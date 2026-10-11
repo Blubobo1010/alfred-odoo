@@ -23,7 +23,7 @@ def load() -> object:
 
 
 def main() -> int:
-    pkg = load()
+    load()
     tools = sys.modules["alfred_odoo.tools"]
     settings = sys.modules["alfred_odoo.settings"]
     print("ping:", json.dumps(tools.ping(settings.make_client()), ensure_ascii=False))
