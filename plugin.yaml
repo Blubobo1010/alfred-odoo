@@ -1,0 +1,67 @@
+name: alfred-odoo
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+label: "Odoo CRM"
+description: "Read-only access to an Odoo 16/17/18 CRM over JSON-RPC: leads and opportunities, pipeline by stage or salesperson, partners, activities and chatter."
+author: Blubobo1010
+license: MIT
+homepage: https://github.com/Blubobo1010/alfred-odoo
+tags: [crm, odoo, sales, read-only]
+kind: standalone
+requires_hermes: ">=0.21.6"
+requires_env:
+  - name: ODOO_URL
+    description: "Base URL of your Odoo, e.g. https://mycompany.odoo.com or https://erp.example.com"
+  - name: ODOO_DB
+    description: "Database name (odoo.sh: the branch's database; self-hosted: the name in the database selector)"
+  - name: ODOO_USERNAME
+    description: "Login of the Odoo user the assistant acts as (usually an email); a dedicated read-only user is recommended"
+  - name: ODOO_API_KEY
+    description: "API key of that user: Odoo > avatar > My Profile > Account Security > New API Key"
+    url: https://www.odoo.com/documentation/17.0/developer/reference/external_api.html#api-keys
+    secret: true
+provides_tools:
+  - odoo_crm_vocabulary
+  - odoo_search_leads
+  - odoo_get_lead
+  - odoo_pipeline_summary
+  - odoo_search_partners
+  - odoo_timeline
+  - odoo_list_activities
+  - odoo_describe_model
+  - odoo_query
+config_schema:
+  default_limit:
+    type: int
+    default: 20
+    description: "Rows per page for list tools (max 100)"
+  timezone:
+    type: str
+    default: ""
+    description: "IANA time zone for displayed datetimes (e.g. Europe/Rome); empty = the Odoo user's time zone"
+  lang:
+    type: str
+    default: ""
+    description: "Odoo context language (e.g. it_IT); empty = the Odoo user's language"
+  company_ids:
+    type: list
+    default: []
+    description: "Restrict queries to these company ids (multi-company); empty = the user's allowed companies"
+  default_team:
+    type: str
+    default: ""
+    description: "Sales team name applied when the question does not name one"
+  timeout_seconds:
+    type: int
+    default: 20
+    description: "HTTP timeout per Odoo call"
+  max_body_chars:
+    type: int
+    default: 800
+    description: "Per-message cap for chatter and description text"
+  advanced_tools:
+    type: bool
+    default: false
+    label: "Enable generic query tools"
+    description: "Exposes odoo_query and odoo_describe_model (read-only, allow-listed models only)"

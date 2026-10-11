@@ -1,0 +1,21 @@
+# Local Odoo with the CRM app and demo data, for manual testing of the plugin.
+#   docker compose -f dev/docker-compose.yml up
+# Then: http://localhost:8069 (admin / admin), create an API key under Preferences > Account Security,
+# and set ODOO_URL=http://localhost:8069 ODOO_DB=demo ODOO_USERNAME=admin ODOO_API_KEY=<key>.
+# Swap the image tag (odoo:16 / odoo:18) to test the version matrix; demo-data flags differ per version.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+  odoo:
+    image: odoo:17
+    depends_on: [db]
+    ports: ["8069:8069"]
+    environment:
+      HOST: db
+      USER: odoo
+      PASSWORD: odoo
+    command: ["odoo", "-d", "demo", "-i", "crm", "--db-filter=^demo$"]
