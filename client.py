@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 READ_METHODS = frozenset({"search_read", "read", "search", "search_count", "read_group", "fields_get", "name_search"})
 

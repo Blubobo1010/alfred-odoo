@@ -201,6 +201,8 @@ def test_schedule_activity_resolves_type_and_user_and_note(configured_writes):
     values = configured_writes.writes[0][2][0]
     assert values["user_id"] == 3 and values["activity_type_id"] == 1 and values["note"] == "<p>bring slides</p>"
     assert call(tools.odoo_schedule_activity, lead_id=10, summary="x", deadline="tomorrow")["error"]["code"] == "bad_argument"
+    assert call(tools.odoo_schedule_activity, lead_id=10, summary="x", note="n" * 4001)["error"]["code"] == "bad_argument"
+    assert len(configured_writes.writes) == 1  # the oversized note was refused, not truncated
     assert call(tools.odoo_schedule_activity, lead_id=10, summary="x", activity_type="zzz")["error"]["code"] == "no_match"
     assert call(tools.odoo_schedule_activity, lead_id=10, summary="x", assign_to="zzz")["error"]["code"] == "no_match"
 

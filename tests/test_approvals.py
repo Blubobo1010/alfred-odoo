@@ -48,6 +48,8 @@ def test_summaries_are_readable_and_bounded():
                                                     "deadline": "2026-10-15", "assign_to": "Alice"})
     assert s == 'Odoo: schedule activity "Demo" on lead #7 (type Meeting, due 2026-10-15, assigned to Alice)'
     assert approval_summary("odoo_schedule_activity", {"lead_id": 7, "summary": "Demo"}).endswith("(due today, assigned to the connected user)")
+    with_note = approval_summary("odoo_schedule_activity", {"lead_id": 7, "summary": "Demo", "note": "bring the <slides>\nand prices"})
+    assert with_note.endswith(', note: "bring the <slides> and prices"')  # the approver sees what gets written
     long = approval_summary("odoo_log_note", {"lead_id": 7, "note": "word " * 500})
     assert len(long) <= SUMMARY_MAX_CHARS and long.endswith('…"')
     assert "\n" not in approval_summary("odoo_log_note", {"lead_id": 7, "note": "a\nb"})

@@ -618,8 +618,10 @@ def odoo_schedule_activity(client: OdooClient, settings: Settings, args: dict[st
     values: dict[str, Any] = {"res_model_id": _crm_lead_model_id(client), "res_id": lead["id"], "activity_type_id": type_id,
                               "summary": summary, "date_deadline": deadline, "user_id": user_ids[0]}
     note = str(args.get("note") or "").strip()
+    if len(note) > _MAX_NOTE_CHARS:
+        raise OdooError("bad_argument", f"note is longer than {_MAX_NOTE_CHARS} characters")
     if note:
-        values["note"] = _note_html(note[:_MAX_NOTE_CHARS])
+        values["note"] = _note_html(note)
     activity_id = client.write_kw("mail.activity", "create", [values], {"context": ctx})
     return {"ok": True, "lead": {"id": lead["id"], "name": lead.get("name")},
             "activity": {"id": _first_id(activity_id), "summary": summary, "type": resolved.get("activity_type"),

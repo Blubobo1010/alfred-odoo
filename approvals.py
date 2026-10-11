@@ -40,6 +40,8 @@ def approval_summary(tool_name: str, args: dict[str, Any] | None) -> str:
                   f"due {args.get('deadline') or 'today'}",
                   f"assigned to {args.get('assign_to') or 'the connected user'}"]
         text = f'Odoo: schedule activity "{_short(args.get("summary"), 80)}" on {lead} ({", ".join(e for e in extras if e)})'
+        if args.get("note"):  # the note is written too: the approver must see it
+            text += f', note: "{_short(args.get("note"), 100)}"'
     elif tool_name == "odoo_update_lead_stage":
         text = f'Odoo: move {lead} to stage "{_short(args.get("stage"), 60)}"'
     else:

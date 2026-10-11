@@ -245,7 +245,7 @@ ODOO_SCHEDULE_ACTIVITY = {
             "activity_type": {"type": "string", "description": "Activity type name (see odoo_crm_vocabulary); default: the first type"},
             "deadline": {"type": "string", "description": "Due date, ISO YYYY-MM-DD or 'today' (default today)"},
             "assign_to": {"type": "string", "description": "Salesperson name, or 'me' (default) for the connected Odoo user"},
-            "note": {"type": "string", "description": "Optional longer description"},
+            "note": {"type": "string", "description": "Optional longer description (max 4000 characters); shown to the approver too"},
         },
         "required": ["lead_id", "summary"],
         "additionalProperties": False,
