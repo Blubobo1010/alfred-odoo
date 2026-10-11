@@ -60,7 +60,7 @@ Settings (`alfred plugins configure alfred-odoo` or the Desktop plugin page): `d
 ## Development
 
 ```bash
-uv run --group dev pytest -q tests   # unit tests with a fake JSON-RPC transport
+uv run --no-project --with pytest pytest -q tests   # unit tests with a fake JSON-RPC transport
 uvx ruff check .
 hermes plugins doctor . --ci      # real plugin loading with the network blocked
 hermes plugins validate .         # manifest + security scan (must be "safe")
