@@ -1,5 +1,5 @@
 import pytest
-from alfred_odoo.client import OdooClient, OdooError, ReadOnlyViolation, map_error, normalize_url
+from alfred_odoo.client import WRITE_OPS, OdooClient, OdooError, ReadOnlyViolation, map_error, normalize_url
 from conftest import FakeOdoo
 
 
@@ -8,6 +8,46 @@ def test_write_methods_refused_without_io(client, fake, method):
     with pytest.raises(ReadOnlyViolation):
         client.execute_kw("crm.lead", method, [[1], {"name": "x"}])
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("model,method", [
+    ("crm.lead", "unlink"), ("crm.lead", "create"), ("crm.lead", "action_set_won"), ("res.partner", "write"),
+    ("mail.activity", "unlink"), ("mail.message", "create"), ("sale.order", "write"),
+])
+def test_write_kw_refuses_everything_outside_the_allow_list(client, fake, model, method):
+    with pytest.raises(OdooError) as exc:
+        client.write_kw(model, method, [[1], {"stage_id": 1}])
+    assert exc.value.code == "write_not_allowed"
+    assert fake.calls == [] and fake.writes == []
+
+
+@pytest.mark.parametrize("values", [{"name": "x"}, {"stage_id": 1, "user_id": 2}, {}])
+def test_write_kw_lead_write_restricted_to_stage(client, fake, values):
+    with pytest.raises(OdooError) as exc:
+        client.write_kw("crm.lead", "write", [[10], values])
+    assert exc.value.code == "field_not_writable"
+    assert fake.writes == []
+
+
+def test_write_kw_allowed_operations_reach_odoo(client, fake):
+    assert client.write_kw("crm.lead", "message_post", [[10]], {"body": "<p>x</p>"}) == 123
+    assert client.write_kw("mail.activity", "create", [{"res_id": 10}]) == 77
+    assert client.write_kw("crm.lead", "write", [[10], {"stage_id": 3}]) is True
+    assert [(m, op) for m, op, _, _ in fake.writes] == [("crm.lead", "message_post"), ("mail.activity", "create"), ("crm.lead", "write")]
+    assert fake.writes[0][3] == {"body": "<p>x</p>"}
+    assert fake.leads[0]["stage_id"] == [3, "Proposition"]
+
+
+def test_write_kw_retries_once_after_expired_session(client, fake):
+    client.uid  # noqa: B018 - prime the session
+    fake.fail_next = {"data": {"name": "odoo.exceptions.AccessDenied", "message": "Session expired"}}
+    assert client.write_kw("crm.lead", "message_post", [[10]], {"body": "x"}) == 123
+    assert sum(1 for c in fake.calls if c[1] == "authenticate") == 2
+    assert len(fake.writes) == 1
+
+
+def test_write_ops_is_the_whole_write_surface():
+    assert WRITE_OPS == {("crm.lead", "message_post"), ("crm.lead", "write"), ("mail.activity", "create")}
 
 
 def test_non_allowlisted_model_refused(client, fake):
@@ -52,6 +92,8 @@ def test_fields_get_cached_and_available_fields(client, fake):
         ({"error": {"data": {"name": "KeyError", "message": "Object crm.lead doesn't exist"}}}, "model_not_installed"),
         ({"error": {"data": {"name": "ValueError", "message": "Invalid field 'foo' on model"}}}, "invalid_field"),
         ({"error": {"data": {"name": "psycopg2.OperationalError", "message": 'database "x" does not exist'}}}, "bad_database"),
+        ({"error": {"data": {"name": "odoo.exceptions.ValidationError", "message": "Invalid stage"}}}, "validation_error"),
+        ({"error": {"data": {"name": "odoo.exceptions.UserError", "message": "Cannot move a lost lead"}}}, "validation_error"),
         ({"error": {"data": {"name": "Other", "message": "boom"}}}, "odoo_error"),
     ],
 )

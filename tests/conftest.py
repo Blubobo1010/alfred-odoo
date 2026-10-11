@@ -57,6 +57,7 @@ STAGES = [
     {"id": 2, "name": "Qualified", "sequence": 2, "is_won": False, "fold": False, "team_id": False},
     {"id": 3, "name": "Proposition", "sequence": 3, "is_won": False, "fold": False, "team_id": False},
     {"id": 4, "name": "Won", "sequence": 4, "is_won": True, "fold": True, "team_id": False},
+    {"id": 5, "name": "Proposal sent", "sequence": 5, "is_won": False, "fold": False, "team_id": [1, "Europe"]},
 ]
 LEADS = [
     {"id": 10, "name": "ACME – 50 seats", "partner_id": [7, "ACME Corp"], "contact_name": "John", "email_from": "john@acme.test",
@@ -87,6 +88,8 @@ class FakeOdoo:
         self.uid = uid
         self.api_key = api_key
         self.calls: list[tuple[str, str, str | None, str | None]] = []
+        self.writes: list[tuple[str, str, list, dict]] = []  # every allow-listed write that reached "Odoo"
+        self.leads = [dict(lead) for lead in LEADS]  # per-test copy: writes mutate it
         self.fields = FIELDS_17 if version >= 17 else FIELDS_16
         self.fail_next: dict | None = None
 
@@ -121,6 +124,23 @@ class FakeOdoo:
             return [{"id": 1, "currency_id": [1, "EUR"]}]
         if model == "crm.stage" and method == "search_read":
             return STAGES
+        if model == "crm.stage" and method == "read":
+            return [dict(s) for s in STAGES if s["id"] in args[0]]
+        if model == "ir.model" and method == "search_read":
+            return [{"id": 99, "model": "crm.lead"}]
+        if model == "crm.lead" and method == "message_post":
+            self.writes.append((model, method, args, kwargs))
+            return 123
+        if model == "mail.activity" and method == "create":
+            self.writes.append((model, method, args, kwargs))
+            return 77
+        if model == "crm.lead" and method == "write":
+            self.writes.append((model, method, args, kwargs))
+            stage = next((s for s in STAGES if s["id"] == args[1].get("stage_id")), None)
+            for lead in self.leads:
+                if lead["id"] in args[0] and stage:
+                    lead["stage_id"] = [stage["id"], stage["name"]]
+            return True
         if model == "crm.stage" and method == "name_search":
             name = args[0].lower()
             return [[s["id"], s["name"]] for s in STAGES if name in s["name"].lower()][: kwargs.get("limit", 10)]
@@ -138,12 +158,12 @@ class FakeOdoo:
             return [{"id": 1, "name": "Hot"}]
         if model == "crm.lead" and method == "search_read":
             limit, offset = kwargs.get("limit"), kwargs.get("offset", 0)
-            rows = LEADS[offset:]
+            rows = self.leads[offset:]
             return rows[:limit] if limit else rows
         if model == "crm.lead" and method == "search_count":
-            return len(LEADS)
+            return len(self.leads)
         if model == "crm.lead" and method == "read":
-            return [dict(lead) for lead in LEADS if lead["id"] in args[0]]
+            return [dict(lead) for lead in self.leads if lead["id"] in args[0]]
         if model == "crm.lead" and method == "read_group":
             return [{"stage_id": [2, "Qualified"], "__count": 1, "expected_revenue": 12000.0, "prorated_revenue": 6000.0},
                     {"stage_id": [3, "Proposition"], "__count": 1, "expected_revenue": 3000.0, "prorated_revenue": 2400.0}]
@@ -197,3 +217,38 @@ def configured(monkeypatch, fake: FakeOdoo):
     monkeypatch.setenv("ODOO_API_KEY", "test-key")
     monkeypatch.setattr(client_mod, "default_transport", fake)
     return fake
+
+
+class FakeCtx:
+    """The subset of PluginContext the plugin uses; settings are read live from ``config``."""
+
+    def __init__(self, config=None):
+        self.tools = {}
+        self.skills = {}
+        self.cli = {}
+        self.hooks: list[tuple[str, Any]] = []
+        self.config = dict(config or {})
+
+    def register_tool(self, name, toolset, schema, handler, check_fn=None, requires_env=None, is_async=False,
+                      description="", emoji="", override=False):
+        self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler, "check_fn": check_fn,
+                            "requires_env": requires_env}
+
+    def register_hook(self, hook_name, callback):
+        self.hooks.append((hook_name, callback))
+
+    def register_skill(self, name, path):
+        self.skills[name] = Path(path)
+
+    def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+        self.cli[name] = (setup_fn, handler_fn)
+
+    def get_config(self, key, default=None):
+        return self.config.get(key, default)
+
+
+@pytest.fixture
+def configured_writes(configured: FakeOdoo) -> FakeOdoo:
+    """``configured`` plus ``write_enabled: true`` in the plugin settings."""
+    settings_mod.bind_context(FakeCtx({"write_enabled": True}))
+    return configured

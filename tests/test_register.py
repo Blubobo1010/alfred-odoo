@@ -5,35 +5,21 @@ from pathlib import Path
 import alfred_odoo
 import pytest
 from alfred_odoo import settings as settings_mod
+from alfred_odoo.approvals import WRITE_TOOLS, pre_tool_call
+from conftest import FakeCtx
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class FakeCtx:
-    def __init__(self, config=None):
-        self.tools = {}
-        self.skills = {}
-        self.cli = {}
-        self.config = config or {}
-
-    def register_tool(self, name, toolset, schema, handler, check_fn=None, requires_env=None, is_async=False,
-                      description="", emoji="", override=False):
-        self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler, "check_fn": check_fn,
-                            "requires_env": requires_env}
-
-    def register_skill(self, name, path):
-        self.skills[name] = Path(path)
-
-    def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
-        self.cli[name] = (setup_fn, handler_fn)
-
-    def get_config(self, key, default=None):
-        return self.config.get(key, default)
-
-
 def manifest_tools() -> list[str]:
     text = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
-    block = text.split("provides_tools:", 1)[1].split("config_schema:", 1)[0]
+    block = text.split("provides_tools:", 1)[1].split("provides_hooks:", 1)[0]
+    return [line.strip()[2:] for line in block.splitlines() if line.strip().startswith("- ")]
+
+
+def manifest_hooks() -> list[str]:
+    text = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
+    block = text.split("provides_hooks:", 1)[1].split("config_schema:", 1)[0]
     return [line.strip()[2:] for line in block.splitlines() if line.strip().startswith("- ")]
 
 
@@ -48,6 +34,8 @@ def test_register_matches_manifest_without_network(fake):
         assert callable(t["handler"]) and callable(t["check_fn"])
     assert ctx.skills["odoo-crm"].is_file()
     assert "odoo" in ctx.cli
+    assert ctx.hooks == [("pre_tool_call", pre_tool_call)]
+    assert [h for h, _ in ctx.hooks] == manifest_hooks()
     assert fake.calls == []
 
 
@@ -67,6 +55,25 @@ def test_advanced_tools_gated_by_setting(configured):
     assert ctx.tools["odoo_search_leads"]["check_fn"]() is True
     ctx.config["advanced_tools"] = True
     assert ctx.tools["odoo_query"]["check_fn"]() is True
+
+
+def test_write_tools_gated_by_setting(configured):
+    ctx = FakeCtx()
+    alfred_odoo.register(ctx)
+    for name in WRITE_TOOLS:
+        assert ctx.tools[name]["check_fn"]() is False
+    ctx.config["write_enabled"] = True
+    for name in WRITE_TOOLS:
+        assert ctx.tools[name]["check_fn"]() is True
+    assert ctx.tools["odoo_query"]["check_fn"]() is False  # independent of advanced_tools
+
+
+def test_write_tools_hidden_without_credentials(monkeypatch):
+    for name in ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    ctx = FakeCtx({"write_enabled": True})
+    alfred_odoo.register(ctx)
+    assert all(ctx.tools[name]["check_fn"]() is False for name in WRITE_TOOLS)
 
 
 def test_settings_read_live_from_ctx(configured):

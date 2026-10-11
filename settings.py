@@ -47,6 +47,7 @@ class Settings:
     timeout_seconds: int = 20
     max_body_chars: int = 800
     advanced_tools: bool = False
+    write_enabled: bool = False
 
 
 def load_settings() -> Settings:
@@ -60,6 +61,7 @@ def load_settings() -> Settings:
         timeout_seconds=int(setting("timeout_seconds", 20) or 20),
         max_body_chars=int(setting("max_body_chars", 800) or 800),
         advanced_tools=bool(setting("advanced_tools", False)),
+        write_enabled=bool(setting("write_enabled", False)),
     )
 
 
@@ -73,6 +75,11 @@ def is_configured() -> bool:
 
 def advanced_enabled() -> bool:
     return is_configured() and load_settings().advanced_tools
+
+
+def write_enabled() -> bool:
+    """check_fn of the write tools: hidden from the model until the operator opts in."""
+    return is_configured() and load_settings().write_enabled
 
 
 def make_client(settings: Settings | None = None) -> OdooClient:

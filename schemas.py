@@ -51,7 +51,7 @@ ODOO_SEARCH_LEADS = {
         "Search Odoo CRM leads and opportunities (deals). Use it for lists and for counts: 'total' is the full "
         "count for the filters. Stage, salesperson, team and tag names are matched loosely; 'me' means the "
         "connected Odoo user. For totals grouped by stage/person/month use odoo_pipeline_summary instead. "
-        "Results are read-only snapshots of Odoo."
+        "Results are snapshots of Odoo at call time."
     ),
     "parameters": {
         "type": "object",
@@ -205,6 +205,66 @@ ODOO_QUERY = {
             "offset": _OFFSET,
         },
         "required": ["model", "fields"],
+        "additionalProperties": False,
+    },
+}
+
+# ---- write tools (hidden unless write_enabled; every call is confirmed by a human) ------------------
+
+_WRITE_NOTICE = (
+    " Only available when the operator enabled writes. Hermes asks a human to approve every call, so "
+    "call it only after the user explicitly asked for this change, with the lead confirmed via "
+    "odoo_get_lead or odoo_search_leads; if the call comes back blocked or denied, do not retry it."
+)
+
+ODOO_LOG_NOTE = {
+    "name": "odoo_log_note",
+    "description": "Post an internal note (not an email) in the chatter of one lead/opportunity." + _WRITE_NOTICE,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "lead_id": {"type": "integer"},
+            "note": {"type": "string", "description": "Plain text of the note (max 4000 characters); line breaks are kept"},
+        },
+        "required": ["lead_id", "note"],
+        "additionalProperties": False,
+    },
+}
+
+ODOO_SCHEDULE_ACTIVITY = {
+    "name": "odoo_schedule_activity",
+    "description": (
+        "Schedule an activity (call, meeting, to-do, email...) on one lead/opportunity, assigned to a "
+        "salesperson with a due date." + _WRITE_NOTICE
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "lead_id": {"type": "integer"},
+            "summary": {"type": "string", "description": "Short title of the activity"},
+            "activity_type": {"type": "string", "description": "Activity type name (see odoo_crm_vocabulary); default: the first type"},
+            "deadline": {"type": "string", "description": "Due date, ISO YYYY-MM-DD or 'today' (default today)"},
+            "assign_to": {"type": "string", "description": "Salesperson name, or 'me' (default) for the connected Odoo user"},
+            "note": {"type": "string", "description": "Optional longer description"},
+        },
+        "required": ["lead_id", "summary"],
+        "additionalProperties": False,
+    },
+}
+
+ODOO_UPDATE_LEAD_STAGE = {
+    "name": "odoo_update_lead_stage",
+    "description": (
+        "Move one lead/opportunity to another pipeline stage (stage name matched loosely, must be "
+        "unambiguous). Moving to a won stage marks the deal as won." + _WRITE_NOTICE
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "lead_id": {"type": "integer"},
+            "stage": {"type": "string", "description": "Target stage name (see odoo_crm_vocabulary)"},
+        },
+        "required": ["lead_id", "stage"],
         "additionalProperties": False,
     },
 }

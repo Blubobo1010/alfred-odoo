@@ -92,6 +92,20 @@ def resolve_ids(client: OdooClient, model: str, text: str | None, *, domain: lis
     return [i for i, _ in chosen]
 
 
+def resolve_one(client: OdooClient, model: str, text: str | None, *, domain: list[Any] | None = None,
+                label: str, resolved: Resolution, context: dict[str, Any] | None = None) -> int:
+    """Like ``resolve_ids`` but for a write target: exactly one record, or an ``ambiguous`` error."""
+    text = (text or "").strip()
+    if not text:
+        raise OdooError("bad_argument", f"{label} is required")
+    ids = resolve_ids(client, model, text, domain=domain, label=label, resolved=resolved, context=context) or []
+    if len(ids) != 1:
+        names = resolved.get(label)
+        raise OdooError("ambiguous", f"{label} {text!r} matches several records: " + ", ".join(names if isinstance(names, list) else [str(names)]),
+                        hint="Repeat the call with one of these exact names.")
+    return ids[0]
+
+
 def user_ids_for(client: OdooClient, who: str | None, *, resolved: Resolution,
                  context: dict[str, Any] | None = None) -> list[int] | None:
     if who and who.strip().lower() in ("me", "myself", "mine", "io"):

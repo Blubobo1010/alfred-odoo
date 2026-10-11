@@ -6,13 +6,13 @@ import argparse
 import sys
 
 from .client import ALLOWED_MODELS, OdooError
-from .settings import make_client
+from .settings import load_settings, make_client
 from .tools import as_json, ping
 
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="odoo_command")
-    sub.add_parser("test", help="Authenticate and report version, user, companies and CRM availability")
+    sub.add_parser("test", help="Authenticate and report version, user, companies, CRM availability and write status")
     sub.add_parser("whoami", help="Show the connected Odoo user")
     p = sub.add_parser("fields", help="List the fields of an allow-listed model")
     p.add_argument("model", help="e.g. crm.lead")
@@ -22,9 +22,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 def odoo_command(args: argparse.Namespace) -> int:
     command = getattr(args, "odoo_command", None) or "test"
     try:
-        client = make_client()
+        settings = load_settings()
+        client = make_client(settings)
         if command == "test":
-            info = ping(client)
+            info = ping(client, settings)
             print(as_json(info))
             if not info.get("crm_installed"):
                 print("CRM is not reachable with these credentials.", file=sys.stderr)

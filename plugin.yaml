@@ -1,13 +1,13 @@
 name: alfred-odoo
-version: 0.1.0
+version: 0.2.0
 manifest_version: 2
 api_version: 1
 label: "Odoo CRM"
-description: "Read-only access to an Odoo 16/17/18 CRM over JSON-RPC: leads and opportunities, pipeline by stage or salesperson, partners, activities and chatter."
+description: "Odoo 16/17/18 CRM over JSON-RPC: read leads and opportunities, pipeline by stage or salesperson, partners, activities and chatter; optionally log notes, schedule activities and move stages, each confirmed by a human."
 author: Blubobo1010
 license: MIT
 homepage: https://github.com/Blubobo1010/alfred-odoo
-tags: [crm, odoo, sales, read-only]
+tags: [crm, odoo, sales]
 kind: standalone
 requires_hermes: ">=0.21.6"
 requires_env:
@@ -16,7 +16,7 @@ requires_env:
   - name: ODOO_DB
     description: "Database name (odoo.sh: the branch's database; self-hosted: the name in the database selector)"
   - name: ODOO_USERNAME
-    description: "Login of the Odoo user the assistant acts as (usually an email); a dedicated read-only user is recommended"
+    description: "Login of the Odoo user the assistant acts as (usually an email); a dedicated user with Sales / User rights only is recommended"
   - name: ODOO_API_KEY
     description: "API key of that user: Odoo > avatar > My Profile > Account Security > New API Key"
     url: https://www.odoo.com/documentation/17.0/developer/reference/external_api.html#api-keys
@@ -31,6 +31,11 @@ provides_tools:
   - odoo_list_activities
   - odoo_describe_model
   - odoo_query
+  - odoo_log_note
+  - odoo_schedule_activity
+  - odoo_update_lead_stage
+provides_hooks:
+  - pre_tool_call
 config_schema:
   default_limit:
     type: int
@@ -65,3 +70,8 @@ config_schema:
     default: false
     label: "Enable generic query tools"
     description: "Exposes odoo_query and odoo_describe_model (read-only, allow-listed models only)"
+  write_enabled:
+    type: bool
+    default: false
+    label: "Enable CRM writes (with approval)"
+    description: "Exposes odoo_log_note, odoo_schedule_activity and odoo_update_lead_stage; every call must be approved by a human (CLI prompt or chat buttons) before it runs"

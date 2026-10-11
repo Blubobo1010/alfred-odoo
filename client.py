@@ -1,7 +1,9 @@
-"""Minimal, read-only Odoo JSON-RPC client (stdlib only).
+"""Minimal Odoo JSON-RPC client (stdlib only).
 
-Every call goes through ``execute_kw`` with a method allow-list and a model allow-list, so the
-plugin cannot write to Odoo even if a tool is misused. Sessions (uid, server version, user
+Reads go through ``execute_kw`` with a method allow-list and a model allow-list, so a misused
+read tool still cannot write to Odoo. The only writes are the explicit ``write_kw`` operations in
+``WRITE_OPS`` (a chatter note, a scheduled activity, a stage move on ``crm.lead``), and the
+``crm.lead`` write is restricted to ``LEAD_WRITABLE_FIELDS``. Sessions (uid, server version, user
 context, ``fields_get``) are cached per credential set and guarded by a lock: the gateway calls
 tool handlers from several threads and one process may serve several profiles.
 """
@@ -20,15 +22,20 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 READ_METHODS = frozenset({"search_read", "read", "search", "search_count", "read_group", "fields_get", "name_search"})
 
 ALLOWED_MODELS = frozenset({
     "crm.lead", "crm.stage", "crm.team", "crm.tag", "crm.lost.reason",
     "res.partner", "res.users", "res.company", "res.currency",
-    "mail.activity", "mail.activity.type", "mail.message", "mail.tracking.value",
+    "mail.activity", "mail.activity.type", "mail.message", "mail.tracking.value", "ir.model",
 })
+
+# The complete set of write operations this plugin can ever perform (model, method).
+WRITE_OPS = frozenset({("crm.lead", "message_post"), ("crm.lead", "write"), ("mail.activity", "create")})
+# Fields a ``crm.lead.write`` may touch.
+LEAD_WRITABLE_FIELDS = frozenset({"stage_id"})
 
 FIELDS_TTL_SECONDS = 600
 Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]
@@ -53,7 +60,8 @@ class OdooError(Exception):
 
 class ReadOnlyViolation(OdooError):
     def __init__(self, what: str):
-        super().__init__("read_only", f"refused: {what} is not a read operation", "This plugin is read-only.")
+        super().__init__("read_only", f"refused: {what} is not a read operation",
+                         "Reads go through execute_kw; the only writes are the allow-listed write_kw operations.")
 
 
 def default_transport(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -123,8 +131,11 @@ def map_error(payload: dict[str, Any], secret: str = "") -> OdooError:
         return OdooError("auth_failed", message, "Check ODOO_USERNAME and ODOO_API_KEY (Odoo 18 keys can expire); "
                          "run `hermes odoo test`.")
     if "accesserror" in name.lower():
-        return OdooError("access_denied", message, "The Odoo user lacks read access to this model "
-                         "(record rules or multi-company).")
+        return OdooError("access_denied", message, "The Odoo user lacks access to this model or operation "
+                         "(access rights, record rules or multi-company).")
+    if "validationerror" in name.lower() or "usererror" in name.lower():
+        return OdooError("validation_error", message[:300], "Odoo refused the change; check the values "
+                         "(stage, deadline, assignee) and the record's state.")
     if "doesn't exist" in low and "object" in low or "model not found" in low:
         return OdooError("model_not_installed", message, "Is the CRM app installed on this Odoo?")
     if "invalid field" in low or "unknown field" in low:
@@ -238,6 +249,31 @@ class OdooClient:
                 self.forget_session()  # retry once with a fresh uid (expired session / key rotation)
                 return self._rpc("object", "execute_kw",
                                  [self.db, self.uid, self._api_key, model, method, args, kwargs or {}])
+            raise
+
+    # ---- allow-listed writes -----------------------------------------------------------------
+
+    def write_kw(self, model: str, method: str, args: list[Any], kwargs: dict[str, Any] | None = None) -> Any:
+        """The only path that can change Odoo: ``(model, method)`` must be in ``WRITE_OPS`` and a
+        ``crm.lead.write`` may only touch ``LEAD_WRITABLE_FIELDS``. Callers are the write tools,
+        which Hermes gates behind the human approval hook (see ``approvals.py``)."""
+        if (model, method) not in WRITE_OPS:
+            raise OdooError("write_not_allowed", f"refused: {model}.{method} is not an allow-listed write",
+                            "Allowed: " + ", ".join(sorted(f"{m}.{op}" for m, op in WRITE_OPS)))
+        if method == "write":
+            values = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            bad = sorted(set(values) - LEAD_WRITABLE_FIELDS)
+            if bad or not values:
+                raise OdooError("field_not_writable", "refused: cannot write " + (", ".join(bad) or "nothing"),
+                                "Writable: " + ", ".join(sorted(LEAD_WRITABLE_FIELDS)))
+        payload = [self.db, self.uid, self._api_key, model, method, args, kwargs or {}]
+        try:
+            return self._rpc("object", "execute_kw", payload)
+        except OdooError as exc:
+            if exc.code == "auth_failed":  # nothing was executed: safe to retry once with a fresh uid
+                self.forget_session()
+                payload[1] = self.uid
+                return self._rpc("object", "execute_kw", payload)
             raise
 
     def search_read(self, model: str, domain: list[Any], fields: list[str], *, limit: int | None = None,

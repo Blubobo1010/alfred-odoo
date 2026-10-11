@@ -1,9 +1,14 @@
 """Tool handlers: ``handler(args, **kwargs) -> str`` (JSON). They never raise; errors come back as
-``{"ok": false, "error": {...}}`` so the model can recover (wrong name -> known values, etc.)."""
+``{"ok": false, "error": {...}}`` so the model can recover (wrong name -> known values, etc.).
+
+The three write tools at the end (note, activity, stage) are hidden unless ``write_enabled`` is
+set, re-check it on every call, and only reach Odoo through ``OdooClient.write_kw``; Hermes asks
+the human before running them (``approvals.py``)."""
 
 from __future__ import annotations
 
 import functools
+import html
 import json
 import time
 from collections.abc import Callable
@@ -521,13 +526,139 @@ def odoo_query(client: OdooClient, settings: Settings, args: dict[str, Any]) -> 
     return envelope(items, total=total, offset=offset, limit=limit, extra={"model": model})
 
 
-def ping(client: OdooClient) -> dict[str, Any]:
+# ---- write tools (opt-in, human-approved) -------------------------------------------------------
+
+WRITE_TOOL_NAMES = ("odoo_log_note", "odoo_schedule_activity", "odoo_update_lead_stage")
+_MAX_NOTE_CHARS = 4000
+_lead_model_id: dict[str, tuple[float, int]] = {}
+
+
+def _require_write(settings: Settings) -> None:
+    if not settings.write_enabled:
+        raise OdooError("writes_disabled", "Odoo writes are disabled for this assistant",
+                        "The operator can enable them with write_enabled: true (Desktop plugin settings or "
+                        "`hermes config set plugins.entries.alfred-odoo.settings.write_enabled true`).")
+
+
+def _load_lead(client: OdooClient, settings: Settings, args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The target lead (name, stage, team) or ``not_found``; also returns the call context."""
+    try:
+        lead_id = int(args.get("lead_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise OdooError("bad_argument", "lead_id (integer) is required") from None
+    ctx = call_context(client, settings, active_test=False)
+    fields = client.available_fields("crm.lead", ["id", "name", "stage_id", "team_id", "user_id", "active"])
+    rows = client.read("crm.lead", [lead_id], fields, context=ctx)
+    if not rows:
+        raise OdooError("not_found", f"lead {lead_id} does not exist or is not visible to the Odoo user")
+    return rows[0], ctx
+
+
+def _note_html(text: str) -> str:
+    return "<p>" + html.escape(text).replace("\n", "<br>") + "</p>"
+
+
+def _first_id(value: Any) -> int | None:
+    """``message_post`` returns the message id (JSON-RPC serialises the recordset as id or [id])."""
+    if isinstance(value, list | tuple):
+        return int(value[0]) if value else None
+    return int(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _crm_lead_model_id(client: OdooClient) -> int:
+    key = f"{client.url}|{client.db}"
+    cached = _lead_model_id.get(key)
+    if cached and time.time() - cached[0] < _VOCAB_TTL:
+        return cached[1]
+    rows = client.search_read("ir.model", [("model", "=", "crm.lead")], ["id"], limit=1)
+    if not rows:
+        raise OdooError("model_not_installed", "crm.lead is not installed on this Odoo")
+    _lead_model_id[key] = (time.time(), int(rows[0]["id"]))
+    return _lead_model_id[key][1]
+
+
+@_guard
+def odoo_log_note(client: OdooClient, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
+    _require_write(settings)
+    note = str(args.get("note") or "").strip()
+    if not note:
+        raise OdooError("bad_argument", "note is required")
+    if len(note) > _MAX_NOTE_CHARS:
+        raise OdooError("bad_argument", f"note is longer than {_MAX_NOTE_CHARS} characters")
+    lead, ctx = _load_lead(client, settings, args)
+    kwargs: dict[str, Any] = {"body": _note_html(note), "message_type": "comment", "subtype_xmlid": "mail.mt_note", "context": ctx}
+    if client.server_major >= 17:  # 17+ escapes a str body unless told it is HTML; 16 treats it as HTML
+        kwargs["body_is_html"] = True
+    result = client.write_kw("crm.lead", "message_post", [[lead["id"]]], kwargs)
+    return {"ok": True, "lead": {"id": lead["id"], "name": lead.get("name")}, "message_id": _first_id(result), "note": note}
+
+
+@_guard
+def odoo_schedule_activity(client: OdooClient, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
+    _require_write(settings)
+    summary = str(args.get("summary") or "").strip()
+    if not summary:
+        raise OdooError("bad_argument", "summary is required")
+    lead, ctx = _load_lead(client, settings, args)
+    resolved = domains.Resolution()
+    deadline = domains.parse_date(args.get("deadline") or "today", "deadline")
+    type_domain = ["|", ("res_model", "=", False), ("res_model", "=", "crm.lead")]
+    if args.get("activity_type"):
+        type_id = domains.resolve_one(client, "mail.activity.type", str(args["activity_type"]), domain=type_domain,
+                                      label="activity_type", resolved=resolved, context=ctx)
+    else:
+        types = client.search_read("mail.activity.type", type_domain, ["id", "name"], order="sequence asc, id asc", limit=1, context=ctx)
+        if not types:
+            raise OdooError("no_match", "this Odoo has no activity type for leads", "Create one in Odoo (Settings > Activity types).")
+        type_id, resolved["activity_type"] = int(types[0]["id"]), types[0]["name"]
+    user_ids = domains.user_ids_for(client, str(args.get("assign_to") or "me"), resolved=resolved, context=ctx) or []
+    if len(user_ids) != 1:
+        raise OdooError("ambiguous", f"assign_to matches several users: {resolved.get('salesperson')}",
+                        hint="Repeat the call with the exact user name.")
+    values: dict[str, Any] = {"res_model_id": _crm_lead_model_id(client), "res_id": lead["id"], "activity_type_id": type_id,
+                              "summary": summary, "date_deadline": deadline, "user_id": user_ids[0]}
+    note = str(args.get("note") or "").strip()
+    if note:
+        values["note"] = _note_html(note[:_MAX_NOTE_CHARS])
+    activity_id = client.write_kw("mail.activity", "create", [values], {"context": ctx})
+    return {"ok": True, "lead": {"id": lead["id"], "name": lead.get("name")},
+            "activity": {"id": _first_id(activity_id), "summary": summary, "type": resolved.get("activity_type"),
+                         "deadline": deadline, "assigned_to": resolved.get("salesperson")}}
+
+
+@_guard
+def odoo_update_lead_stage(client: OdooClient, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
+    _require_write(settings)
+    stage_text = str(args.get("stage") or "").strip()
+    if not stage_text:
+        raise OdooError("bad_argument", "stage is required")
+    lead, ctx = _load_lead(client, settings, args)
+    resolved = domains.Resolution()
+    stage_domain: list[Any] | None = None
+    if "team_id" in client.fields_get("crm.stage"):
+        team_id = m2o_id(lead.get("team_id"))
+        stage_domain = ["|", ("team_id", "=", False), ("team_id", "=", team_id)] if team_id else [("team_id", "=", False)]
+    stage_id = domains.resolve_one(client, "crm.stage", stage_text, domain=stage_domain, label="stage", resolved=resolved, context=ctx)
+    stage_rows = client.read("crm.stage", [stage_id], client.available_fields("crm.stage", ["name", "is_won"]), context=ctx)
+    stage = stage_rows[0] if stage_rows else {"name": resolved.get("stage")}
+    out = {"ok": True, "lead": {"id": lead["id"], "name": lead.get("name")}, "from_stage": m2o(lead.get("stage_id")),
+           "to_stage": stage.get("name"), "is_won": bool(stage.get("is_won"))}
+    if m2o_id(lead.get("stage_id")) == stage_id:
+        return {**out, "changed": False, "note": "The lead is already in that stage; nothing was written."}
+    client.write_kw("crm.lead", "write", [[lead["id"]], {"stage_id": stage_id}], {"context": ctx})
+    return {**out, "changed": True}
+
+
+def ping(client: OdooClient, settings: Settings | None = None) -> dict[str, Any]:
     """Used by `hermes odoo test`: authenticate and describe what the connection can see."""
     version = client.version()
     user = client.user_context()
     out: dict[str, Any] = {"url": client.url, "db": client.db, "odoo_version": version.get("server_version"),
                            "user": user.get("name"), "uid": client.uid, "tz": user.get("tz"), "lang": user.get("lang"),
                            "company_ids": user.get("company_ids")}
+    if settings is not None:
+        out["write_enabled"] = settings.write_enabled
+        out["write_tools"] = list(WRITE_TOOL_NAMES) if settings.write_enabled else []
     try:
         out["open_opportunities"] = client.search_count("crm.lead", [("type", "=", "opportunity")])
         out["crm_installed"] = True
