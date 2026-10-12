@@ -26,7 +26,9 @@ _load_package()
 
 from alfred_odoo import client as client_mod  # noqa: E402
 from alfred_odoo import settings as settings_mod  # noqa: E402
-from alfred_odoo.client import OdooClient  # noqa: E402
+from alfred_odoo.client import AREAS, OdooClient  # noqa: E402
+
+ALL_AREAS = list(AREAS)
 
 FIELDS_17 = {
     "crm.lead": {f: {"string": f, "type": "char"} for f in (
@@ -128,6 +130,8 @@ class FakeOdoo:
             return [dict(s) for s in STAGES if s["id"] in args[0]]
         if model == "ir.model" and method == "search_read":
             return [{"id": 99, "model": "crm.lead"}]
+        if model == "ir.model" and method == "search_count":
+            return 1
         if model == "crm.lead" and method == "message_post":
             self.writes.append((model, method, args, kwargs))
             return 123
@@ -205,17 +209,18 @@ def fake() -> FakeOdoo:
 
 @pytest.fixture
 def client(fake: FakeOdoo) -> OdooClient:
-    return OdooClient("https://odoo.test", "demo", "admin", "test-key", transport=fake)
+    return OdooClient("https://odoo.test", "demo", "admin", "test-key", areas=AREAS, transport=fake)
 
 
 @pytest.fixture
 def configured(monkeypatch, fake: FakeOdoo):
-    """Credentials in the environment + the fake transport wired into make_client."""
+    """Credentials in the environment + the fake transport wired into make_client, every data area enabled."""
     monkeypatch.setenv("ODOO_URL", "https://odoo.test")
     monkeypatch.setenv("ODOO_DB", "demo")
     monkeypatch.setenv("ODOO_USERNAME", "admin")
     monkeypatch.setenv("ODOO_API_KEY", "test-key")
     monkeypatch.setattr(client_mod, "default_transport", fake)
+    settings_mod.bind_context(FakeCtx({"enabled_areas": ALL_AREAS}))
     return fake
 
 
@@ -250,5 +255,5 @@ class FakeCtx:
 @pytest.fixture
 def configured_writes(configured: FakeOdoo) -> FakeOdoo:
     """``configured`` plus ``write_enabled: true`` in the plugin settings."""
-    settings_mod.bind_context(FakeCtx({"write_enabled": True}))
+    settings_mod.bind_context(FakeCtx({"write_enabled": True, "enabled_areas": ALL_AREAS}))
     return configured

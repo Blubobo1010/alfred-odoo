@@ -1,5 +1,5 @@
 import pytest
-from alfred_odoo.client import WRITE_OPS, OdooClient, OdooError, ReadOnlyViolation, map_error, normalize_url
+from alfred_odoo.client import AREAS, WRITE_OPS, OdooClient, OdooError, ReadOnlyViolation, map_error, normalize_url
 from conftest import FakeOdoo
 
 
@@ -58,15 +58,15 @@ def test_non_allowlisted_model_refused(client, fake):
 
 
 def test_authenticate_false_maps_to_auth_failed(fake):
-    bad = OdooClient("https://odoo.test", "demo", "admin", "wrong", transport=fake)
+    bad = OdooClient("https://odoo.test", "demo", "admin", "wrong", areas=AREAS, transport=fake)
     with pytest.raises(OdooError) as exc:
         bad.search_count("crm.lead", [])
     assert exc.value.code == "auth_failed"
 
 
 def test_uid_cached_per_credentials(fake):
-    a = OdooClient("https://odoo.test", "demo", "admin", "test-key", transport=fake)
-    b = OdooClient("https://odoo.test", "demo", "admin", "test-key", transport=fake)
+    a = OdooClient("https://odoo.test", "demo", "admin", "test-key", areas=AREAS, transport=fake)
+    b = OdooClient("https://odoo.test", "demo", "admin", "test-key", areas=AREAS, transport=fake)
     assert a.uid == 2 and b.uid == 2
     assert sum(1 for c in fake.calls if c[1] == "authenticate") == 1
 

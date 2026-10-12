@@ -91,14 +91,15 @@ ODOO_PIPELINE_SUMMARY = {
         "Aggregate the pipeline: count, expected revenue and weighted (probability-adjusted) revenue grouped by "
         "stage (default), salesperson, team, deadline month, creation month or lost reason. Accepts the same "
         "filters as odoo_search_leads. Use it for 'how is the pipeline', 'revenue by stage', 'who has the most "
-        "open deals', forecasts."
+        "open deals', forecasts. If the operator set a plausible revenue range, implausible amounts are left out "
+        "of the sums and listed under suspect_amounts."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "group_by": {"type": "string",
-                         "enum": ["stage", "salesperson", "team", "deadline_month", "created_month", "lost_reason"],
-                         "description": "Default stage"},
+                         "description": "stage (default), salesperson, team, deadline_month, created_month, lost_reason, "
+                                        "or a custom field label listed by odoo_crm_vocabulary (custom_fields)"},
             **_LEAD_FILTERS,
         },
         "additionalProperties": False,

@@ -1,7 +1,10 @@
 """Minimal Odoo JSON-RPC client (stdlib only).
 
 Reads go through ``execute_kw`` with a method allow-list and a model allow-list, so a misused
-read tool still cannot write to Odoo. The only writes are the explicit ``write_kw`` operations in
+read tool still cannot write to Odoo. On top of that every model belongs to a data *area*
+(``AREA_MODELS``) and records of an area are only read or written once the operator has enabled
+that area (``enabled_areas``): default-deny, because a customer's Odoo data is often not clean
+enough to answer from until someone has checked it. The only writes are the explicit ``write_kw`` operations in
 ``WRITE_OPS`` (a chatter note, a scheduled activity, a stage move on ``crm.lead``), and the
 ``crm.lead`` write is restricted to ``LEAD_WRITABLE_FIELDS``. Sessions (uid, server version, user
 context, ``fields_get``) are cached per credential set and guarded by a lock: the gateway calls
@@ -22,15 +25,24 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 READ_METHODS = frozenset({"search_read", "read", "search", "search_count", "read_group", "fields_get", "name_search"})
 
-ALLOWED_MODELS = frozenset({
-    "crm.lead", "crm.stage", "crm.team", "crm.tag", "crm.lost.reason",
-    "res.partner", "res.users", "res.company", "res.currency",
-    "mail.activity", "mail.activity.type", "mail.message", "mail.tracking.value", "ir.model",
-})
+# Data areas: records of these models are only touched when the area is in ``enabled_areas``.
+AREA_MODELS: dict[str, frozenset[str]] = {
+    "crm": frozenset({"crm.lead", "crm.stage", "crm.team", "crm.tag", "crm.lost.reason"}),
+    "contacts": frozenset({"res.partner"}),
+    "activities": frozenset({"mail.activity", "mail.activity.type"}),
+    "chatter": frozenset({"mail.message", "mail.tracking.value"}),
+}
+AREAS = tuple(AREA_MODELS)
+# Session metadata (connected user, companies, currency, model ids): always readable.
+META_MODELS = frozenset({"res.users", "res.company", "res.currency", "ir.model"})
+ALLOWED_MODELS = META_MODELS.union(*AREA_MODELS.values())
+# Schema introspection returns no records, so it works on every allow-listed model: the operator
+# checks an area's fields before enabling it.
+SCHEMA_METHODS = frozenset({"fields_get"})
 
 # The complete set of write operations this plugin can ever perform (model, method).
 WRITE_OPS = frozenset({("crm.lead", "message_post"), ("crm.lead", "write"), ("mail.activity", "create")})
@@ -56,6 +68,33 @@ class OdooError(Exception):
         if self.hint:
             out["hint"] = self.hint
         return out
+
+
+def area_of(model: str) -> str | None:
+    """The data area a model belongs to; None for the always-readable metadata models."""
+    for area, models in AREA_MODELS.items():
+        if model in models:
+            return area
+    return None
+
+
+def normalize_areas(values: Any) -> tuple[frozenset[str], tuple[str, ...]]:
+    """``enabled_areas`` setting -> (known areas, unknown names). A string is split on commas."""
+    if isinstance(values, str):
+        values = values.split(",")
+    names = [str(v).strip().lower() for v in (values or []) if str(v).strip()]
+    known = frozenset(n for n in names if n in AREA_MODELS)
+    unknown = tuple(sorted({n for n in names if n not in AREA_MODELS}))
+    return known, unknown
+
+
+class AreaNotEnabled(OdooError):
+    def __init__(self, area: str, model: str):
+        super().__init__(
+            "area_not_enabled", f"the Odoo area {area!r} ({model}) is not enabled for this assistant",
+            "Do not retry and do not guess: tell the user this Odoo data is not available yet. The operator "
+            "enables an area (enabled_areas in the plugin settings) after checking its data with the customer.")
+        self.area = area
 
 
 class ReadOnlyViolation(OdooError):
@@ -147,14 +186,15 @@ def map_error(payload: dict[str, Any], secret: str = "") -> OdooError:
 
 
 class OdooClient:
-    def __init__(self, url: str, db: str, username: str, api_key: str, *, timeout: float = 20.0,
-                 transport: Transport | None = None):
+    def __init__(self, url: str, db: str, username: str, api_key: str, *, areas: Any = (),
+                 timeout: float = 20.0, transport: Transport | None = None):
         self.url = normalize_url(url)
         self.db = db.strip()
         self.username = username.strip()
         self._api_key = api_key
         self.timeout = float(timeout)
         self._transport = transport or default_transport
+        self.areas, _ = normalize_areas(areas)
         self._key = hashlib.sha256(f"{self.url}|{self.db}|{self.username}|{api_key}".encode()).hexdigest()
         if not (self.db and self.username and api_key):
             raise OdooError("not_configured", "ODOO_DB, ODOO_USERNAME and ODOO_API_KEY must all be set")
@@ -234,6 +274,16 @@ class OdooClient:
             }
         return s.user_context
 
+    # ---- area gate --------------------------------------------------------------------------
+
+    def area_enabled(self, area: str) -> bool:
+        return area in self.areas
+
+    def require_area(self, model: str) -> None:
+        area = area_of(model)
+        if area is not None and area not in self.areas:
+            raise AreaNotEnabled(area, model)
+
     # ---- read-only execute_kw ----------------------------------------------------------------
 
     def execute_kw(self, model: str, method: str, args: list[Any], kwargs: dict[str, Any] | None = None) -> Any:
@@ -242,6 +292,8 @@ class OdooClient:
         if model not in ALLOWED_MODELS:
             raise OdooError("model_not_allowed", f"model {model!r} is not in the allow-list",
                             "Allowed: " + ", ".join(sorted(ALLOWED_MODELS)))
+        if method not in SCHEMA_METHODS:
+            self.require_area(model)
         try:
             return self._rpc("object", "execute_kw", [self.db, self.uid, self._api_key, model, method, args, kwargs or {}])
         except OdooError as exc:
@@ -260,6 +312,7 @@ class OdooClient:
         if (model, method) not in WRITE_OPS:
             raise OdooError("write_not_allowed", f"refused: {model}.{method} is not an allow-listed write",
                             "Allowed: " + ", ".join(sorted(f"{m}.{op}" for m, op in WRITE_OPS)))
+        self.require_area(model)
         if method == "write":
             values = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
             bad = sorted(set(values) - LEAD_WRITABLE_FIELDS)

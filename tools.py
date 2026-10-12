@@ -16,7 +16,7 @@ from datetime import date
 from typing import Any
 
 from . import domains
-from .client import ALLOWED_MODELS, OdooClient, OdooError
+from .client import ALLOWED_MODELS, AREAS, AreaNotEnabled, OdooClient, OdooError
 from .humanize import (
     UNTRUSTED_NOTICE,
     clamp_limit,
@@ -50,6 +50,14 @@ ACTIVITY_FIELDS = ["id", "summary", "activity_type_id", "date_deadline", "user_i
                    "res_name", "note", "create_date"]
 MESSAGE_FIELDS = ["id", "date", "author_id", "message_type", "subtype_id", "subject", "body", "model", "res_id",
                   "record_name", "email_from"]
+# Timeline kinds and the data area each one reads.
+KIND_AREAS = {"messages": "chatter", "notes": "chatter", "stage_changes": "chatter", "activities": "activities"}
+# Built-in pipeline_summary groupings; operator-configured custom_fields labels are added on top.
+GROUPBY_MAP = {"stage": "stage_id", "salesperson": "user_id", "team": "team_id", "deadline_month": "date_deadline:month",
+               "created_month": "create_date:month", "lost_reason": "lost_reason_id"}
+_X2MANY = {"many2many", "one2many"}
+_CLIENT_GROUP_LIMIT = 5000
+_SUSPECT_SAMPLE = 20
 _VOCAB_TTL = 600
 _vocab_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -62,6 +70,9 @@ def _guard(fn: Callable[..., Any]) -> Callable[..., str]:
         args = dict(args or {})
         try:
             settings = load_settings()
+            if settings.config_errors:
+                raise OdooError("bad_config", "invalid plugin settings: " + "; ".join(settings.config_errors),
+                                "Tell the user the Odoo plugin is misconfigured; the operator fixes the plugin settings.")
             client = make_client(settings)
             payload = fn(client, settings, args)
             return dumps(payload) if isinstance(payload, dict) else str(payload)
@@ -85,6 +96,40 @@ def _money(row: dict[str, Any], field: str, currency: str | None) -> dict[str, A
     return {"amount": float(value), "currency": currency}
 
 
+def _is_suspect(amount: Any, revenue_range: tuple[float, float] | None) -> bool:
+    """An amount outside the operator's plausible range (typos like 880 for 880,000). Zero = not filled in."""
+    if not revenue_range or not amount:
+        return False
+    low, high = revenue_range
+    return not low <= float(amount) <= high
+
+
+def custom_lead_fields(client: OdooClient, settings: Settings) -> tuple[dict[str, str], dict[str, str]]:
+    """Operator-configured crm.lead fields (label -> field) that exist and are scalar or many2one, and the
+    rejected ones (label -> reason). x2many fields are refused: their names would need reading another model."""
+    if not settings.custom_fields:
+        return {}, {}
+    meta = client.fields_get("crm.lead")
+    usable: dict[str, str] = {}
+    rejected: dict[str, str] = {}
+    for label, field in settings.custom_fields:
+        if label in GROUPBY_MAP:
+            rejected[label] = "label clashes with a built-in group_by"
+        elif field not in meta:
+            rejected[label] = f"crm.lead has no field {field}"
+        elif meta[field].get("type") in _X2MANY:
+            rejected[label] = f"{field} is {meta[field].get('type')}; use a many2one or plain field"
+        else:
+            usable[label] = field
+    return usable, rejected
+
+
+def _custom_value(value: Any) -> Any:
+    if isinstance(value, list | tuple):
+        return m2o(value)
+    return None if value in (False, "") else value
+
+
 def _lead_status(row: dict[str, Any]) -> str:
     if "won_status" in row and row["won_status"]:
         return {"pending": "open", "won": "won", "lost": "lost"}.get(row["won_status"], str(row["won_status"]))
@@ -94,7 +139,8 @@ def _lead_status(row: dict[str, Any]) -> str:
 
 
 def _format_lead(row: dict[str, Any], tz: Any, tag_names: dict[int, str], currency: str | None,
-                 max_chars: int, detail: bool = False) -> dict[str, Any]:
+                 max_chars: int, detail: bool = False, revenue_range: tuple[float, float] | None = None,
+                 custom: dict[str, str] | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": row.get("id"),
         "name": row.get("name"),
@@ -119,6 +165,11 @@ def _format_lead(row: dict[str, Any], tz: Any, tag_names: dict[int, str], curren
             if row.get("activity_date_deadline") else None
         ),
     }
+    if out["expected_revenue"] and _is_suspect(row.get("expected_revenue"), revenue_range):
+        out["expected_revenue"]["suspect"] = True
+    extra = {label: _custom_value(row.get(field)) for label, field in (custom or {}).items()}
+    if any(v is not None for v in extra.values()):
+        out["custom_fields"] = extra
     if detail:
         out.update({
             "description": html_to_text(row.get("description"), max_chars) or None,
@@ -163,7 +214,8 @@ def _currency(client: OdooClient, rows: list[dict[str, Any]]) -> str | None:
 @_guard
 def odoo_crm_vocabulary(client: OdooClient, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     include = set(args.get("include") or ["stages", "teams", "salespeople", "tags", "lost_reasons", "activity_types"])
-    key = f"{client.url}|{client.db}|{client.username}"
+    key = (f"{client.url}|{client.db}|{client.username}|{','.join(sorted(client.areas))}|"
+           f"{settings.custom_fields}|{settings.revenue_range}")
     cached = _vocab_cache.get(key)
     if cached and time.time() - cached[0] < _VOCAB_TTL:
         full = cached[1]
@@ -185,10 +237,21 @@ def odoo_crm_vocabulary(client: OdooClient, settings: Settings, args: dict[str, 
             "res.users", [("share", "=", False), ("active", "=", True)], ["name"], order="name asc", limit=200, context=ctx)]
         full["tags"] = [t["name"] for t in client.search_read("crm.tag", [], ["name"], order="name asc", limit=200, context=ctx)]
         full["lost_reasons"] = [r["name"] for r in client.search_read("crm.lost.reason", [], ["name"], order="name asc", context=ctx)]
-        full["activity_types"] = [a["name"] for a in client.search_read(
-            "mail.activity.type", ["|", ("res_model", "=", False), ("res_model", "=", "crm.lead")], ["name"], order="sequence asc, id asc", context=ctx)]
+        if client.area_enabled("activities"):
+            full["activity_types"] = [a["name"] for a in client.search_read(
+                "mail.activity.type", ["|", ("res_model", "=", False), ("res_model", "=", "crm.lead")], ["name"],
+                order="sequence asc, id asc", context=ctx)]
+        custom, rejected = custom_lead_fields(client, settings)
+        if custom:
+            full["custom_fields"] = sorted(custom)  # extra lead fields, also valid pipeline group_by values
+        if rejected:
+            full["custom_fields_rejected"] = rejected
+        if settings.revenue_range:
+            low, high = settings.revenue_range
+            full["plausible_revenue_range"] = [low, None if high == float("inf") else high]
         _vocab_cache[key] = (time.time(), full)
-    keep = {"ok", "odoo_version", "connected_user", "currency"} | include
+    keep = {"ok", "odoo_version", "connected_user", "currency", "custom_fields", "custom_fields_rejected",
+            "plausible_revenue_range"} | include
     return {k: v for k, v in full.items() if k in keep}
 
 
@@ -198,14 +261,16 @@ def odoo_search_leads(client: OdooClient, settings: Settings, args: dict[str, An
     offset = clamp_offset(args.get("offset"))
     domain, extra_ctx, resolved = domains.lead_domain(client, args, default_team=settings.default_team)
     ctx = call_context(client, settings, **extra_ctx)
-    fields = client.available_fields("crm.lead", LEAD_LIST_FIELDS)
+    custom, _ = custom_lead_fields(client, settings)
+    fields = client.available_fields("crm.lead", LEAD_LIST_FIELDS + list(custom.values()))
     rows = client.search_read("crm.lead", domain, fields, limit=limit, offset=offset,
                               order=domains.lead_order(args.get("sort")), context=ctx)
     total = client.search_count("crm.lead", domain, context=ctx)
     tz = resolve_tz(ctx.get("tz"))
     currency = _currency(client, rows)
     tags = _tag_names(client, rows, ctx)
-    items = [_format_lead(r, tz, tags, currency, settings.max_body_chars) for r in rows]
+    items = [_format_lead(r, tz, tags, currency, settings.max_body_chars, revenue_range=settings.revenue_range,
+                          custom=custom) for r in rows]
     extra = {"resolved": dict(resolved)} if resolved else None
     return envelope(items, total=total, offset=offset, limit=limit, extra=extra)
 
@@ -214,30 +279,36 @@ def odoo_search_leads(client: OdooClient, settings: Settings, args: dict[str, An
 def odoo_get_lead(client: OdooClient, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     lead_id = int(args["lead_id"])
     ctx = call_context(client, settings, active_test=False)
-    fields = client.available_fields("crm.lead", LEAD_LIST_FIELDS + LEAD_DETAIL_EXTRA)
+    custom, _ = custom_lead_fields(client, settings)
+    fields = client.available_fields("crm.lead", LEAD_LIST_FIELDS + LEAD_DETAIL_EXTRA + list(custom.values()))
     rows = client.read("crm.lead", [lead_id], fields, context=ctx)
     if not rows:
         raise OdooError("not_found", f"lead {lead_id} does not exist or is not visible to the Odoo user")
     tz = resolve_tz(ctx.get("tz"))
-    lead = _format_lead(rows[0], tz, _tag_names(client, rows, ctx), _currency(client, rows), settings.max_body_chars, detail=True)
+    lead = _format_lead(rows[0], tz, _tag_names(client, rows, ctx), _currency(client, rows), settings.max_body_chars, detail=True,
+                        revenue_range=settings.revenue_range, custom=custom)
     out: dict[str, Any] = {"ok": True, "lead": lead}
     if args.get("include_timeline", True):
-        limit = clamp_limit(args.get("timeline_limit"), 10)
-        entries, untrusted = _timeline_entries(client, settings, ctx, lead_ids=[lead_id], kinds={"messages", "notes", "activities"},
-                                               since=None, limit=limit)
-        out["timeline"] = entries
-        if untrusted:
-            out["content_notice"] = UNTRUSTED_NOTICE
+        kinds, skipped = _enabled_kinds(client, {"messages", "notes", "activities"})
+        if kinds:
+            limit = clamp_limit(args.get("timeline_limit"), 10)
+            entries, untrusted = _timeline_entries(client, settings, ctx, lead_ids=[lead_id], kinds=kinds, since=None, limit=limit)
+            out["timeline"] = entries
+            if untrusted:
+                out["content_notice"] = UNTRUSTED_NOTICE
+        if skipped:
+            out["areas_not_enabled"] = skipped
     return out
 
 
 @_guard
 def odoo_pipeline_summary(client: OdooClient, settings: Settings, args: dict[str, Any]) -> dict[str, Any]:
     group = (args.get("group_by") or "stage").lower()
-    groupby_map = {"stage": "stage_id", "salesperson": "user_id", "team": "team_id", "deadline_month": "date_deadline:month",
-                   "created_month": "create_date:month", "lost_reason": "lost_reason_id"}
+    custom, rejected = custom_lead_fields(client, settings)
+    groupby_map = {**GROUPBY_MAP, **custom}
     if group not in groupby_map:
-        raise OdooError("bad_argument", f"group_by must be one of {', '.join(groupby_map)}")
+        hint = f" ({rejected[group]})" if group in rejected else ""
+        raise OdooError("bad_argument", f"group_by must be one of {', '.join(groupby_map)}{hint}")
     if group == "lost_reason":
         args = {**args, "status": args.get("status") or "lost"}
     domain, extra_ctx, resolved = domains.lead_domain(client, args, default_team=settings.default_team)
@@ -247,12 +318,18 @@ def odoo_pipeline_summary(client: OdooClient, settings: Settings, args: dict[str
     if groupby.split(":")[0] not in lead_fields:
         raise OdooError("invalid_field", f"this Odoo has no field for group_by={group}")
     sums = [f"{f}:sum" for f in ("expected_revenue", "prorated_revenue") if f in lead_fields]
-    try:
-        groups = client.read_group("crm.lead", domain, sums, [groupby], context=ctx)
-    except OdooError as exc:
-        if exc.code != "odoo_error":
-            raise
-        groups = _client_side_group(client, domain, groupby, ctx, lead_fields)
+    suspects: list[dict[str, Any]] | None = None
+    truncated = False
+    if settings.revenue_range:
+        # Server-side sums would include the implausible amounts: aggregate the rows here instead.
+        groups, suspects, truncated = _client_side_group(client, domain, groupby, ctx, lead_fields, settings.revenue_range)
+    else:
+        try:
+            groups = client.read_group("crm.lead", domain, sums, [groupby], context=ctx)
+        except OdooError as exc:
+            if exc.code != "odoo_error":
+                raise
+            groups, _, truncated = _client_side_group(client, domain, groupby, ctx, lead_fields, None)
     currency = _currency(client, [])
     items = []
     total_count = 0
@@ -267,36 +344,59 @@ def odoo_pipeline_summary(client: OdooClient, settings: Settings, args: dict[str
         total_count += count
         total_expected += expected
         total_weighted += weighted
-        items.append({"key": key, "count": count, "expected_revenue": round(expected, 2), "weighted_revenue": round(weighted, 2)})
+        item = {"key": key, "count": count, "expected_revenue": round(expected, 2), "weighted_revenue": round(weighted, 2)}
+        if g.get("__suspect"):
+            item["suspect_amounts"] = g["__suspect"]
+        items.append(item)
     if group == "stage":
         order = {s["name"]: i for i, s in enumerate(client.search_read("crm.stage", [], ["name"], order="sequence asc, id asc", context=ctx))}
         items.sort(key=lambda it: order.get(it["key"], 10_000))
     out: dict[str, Any] = {"ok": True, "group_by": group, "currency": currency, "groups": items,
                            "totals": {"count": total_count, "expected_revenue": round(total_expected, 2),
                                       "weighted_revenue": round(total_weighted, 2)}}
+    if suspects is not None and suspects:
+        low, high = settings.revenue_range
+        out["suspect_amounts"] = {
+            "range": [low, None if high == float("inf") else high],
+            "count": len(suspects),
+            "excluded_expected_revenue": round(sum(s["expected_revenue"] for s in suspects), 2),
+            "leads": suspects[:_SUSPECT_SAMPLE],
+            "note": "These amounts are outside the plausible range (likely typos): they are counted but left out "
+                    "of the revenue sums. Mention them; do not correct them.",
+        }
+    if truncated:
+        out["truncated"] = True
+        out["note"] = f"Only the first {_CLIENT_GROUP_LIMIT} matching leads were aggregated; narrow the filters."
     if resolved:
         out["resolved"] = dict(resolved)
     return out
 
 
 def _client_side_group(client: OdooClient, domain: list[Any], groupby: str, ctx: dict[str, Any],
-                       lead_fields: dict[str, Any]) -> list[dict[str, Any]]:
-    """Fallback when read_group is unavailable (Odoo 19+ renamed it): aggregate up to 2000 rows locally."""
+                       lead_fields: dict[str, Any], revenue_range: tuple[float, float] | None,
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Aggregate the rows locally: when a plausible revenue range is set, or when read_group is unavailable
+    (Odoo 19+ renamed it). Implausible amounts are counted but kept out of the sums and returned apart."""
     field, _, granularity = groupby.partition(":")
-    wanted = [f for f in (field, "expected_revenue", "prorated_revenue") if f in lead_fields]
-    rows = client.search_read("crm.lead", domain, wanted, limit=2000, context=ctx)
+    wanted = [f for f in (field, "name", "expected_revenue", "prorated_revenue") if f in lead_fields]
+    rows = client.search_read("crm.lead", domain, wanted, limit=_CLIENT_GROUP_LIMIT, context=ctx)
     buckets: dict[Any, dict[str, Any]] = {}
+    suspects: list[dict[str, Any]] = []
     for r in rows:
         raw = r.get(field)
         key: Any = tuple(raw) if isinstance(raw, list) else raw
         if granularity == "month" and isinstance(raw, str) and len(raw) >= 7:
             key = raw[:7]
         b = buckets.setdefault(key, {groupby: list(key) if isinstance(key, tuple) else key, "__count": 0,
-                                     "expected_revenue": 0.0, "prorated_revenue": 0.0})
+                                     "expected_revenue": 0.0, "prorated_revenue": 0.0, "__suspect": 0})
         b["__count"] += 1
+        if _is_suspect(r.get("expected_revenue"), revenue_range):
+            b["__suspect"] += 1
+            suspects.append({"id": r.get("id"), "name": r.get("name"), "expected_revenue": float(r["expected_revenue"])})
+            continue
         b["expected_revenue"] += float(r.get("expected_revenue") or 0.0)
         b["prorated_revenue"] += float(r.get("prorated_revenue") or 0.0)
-    return list(buckets.values())
+    return list(buckets.values()), suspects, len(rows) >= _CLIENT_GROUP_LIMIT
 
 
 @_guard
@@ -329,6 +429,13 @@ def odoo_search_partners(client: OdooClient, settings: Settings, args: dict[str,
         }
         items.append({k: v for k, v in item.items() if v is not None})
     return envelope(items, total=total, offset=offset, limit=limit)
+
+
+def _enabled_kinds(client: OdooClient, kinds: set[str]) -> tuple[set[str], list[str]]:
+    """Timeline kinds whose data area is enabled, plus the sorted list of areas left out."""
+    keep = {k for k in kinds if client.area_enabled(KIND_AREAS.get(k, "chatter"))}
+    skipped = sorted({KIND_AREAS.get(k, "chatter") for k in kinds - keep})
+    return keep, skipped
 
 
 def _timeline_entries(client: OdooClient, settings: Settings, ctx: dict[str, Any], *, lead_ids: list[int] | None,
@@ -402,20 +509,30 @@ def odoo_timeline(client: OdooClient, settings: Settings, args: dict[str, Any]) 
     lead_id, partner_id = args.get("lead_id"), args.get("partner_id")
     if bool(lead_id) == bool(partner_id):
         raise OdooError("bad_argument", "pass exactly one of lead_id or partner_id")
-    kinds = set(args.get("kinds") or ["messages", "notes", "activities"])
+    requested = set(args.get("kinds") or ["messages", "notes", "activities"])
+    kinds, skipped = _enabled_kinds(client, requested)
+    if not kinds:
+        raise AreaNotEnabled(", ".join(skipped) or "chatter", "timeline")
     limit = clamp_limit(args.get("limit"), 15)
     since = domains.parse_date(args.get("since"), "since")
     ctx = call_context(client, settings, active_test=False)
     if lead_id:
+        client.require_area("crm.lead")  # a lead's history is CRM data
         lead_ids, partner_ids = [int(lead_id)], None
     else:
         partner_ids = [p["id"] for p in client.search_read("res.partner", [("id", "child_of", int(partner_id))], ["id"], limit=200, context=ctx)]
         if not partner_ids:
             raise OdooError("not_found", f"partner {partner_id} does not exist or is not visible")
-        lead_ids = [lead["id"] for lead in client.search_read("crm.lead", [("partner_id", "in", partner_ids)], ["id"], limit=200, context=ctx)]
+        lead_ids = []
+        if client.area_enabled("crm"):
+            lead_ids = [lead["id"] for lead in client.search_read("crm.lead", [("partner_id", "in", partner_ids)], ["id"], limit=200, context=ctx)]
+        else:
+            skipped = sorted({*skipped, "crm"})
     entries, untrusted = _timeline_entries(client, settings, ctx, lead_ids=lead_ids, partner_ids=partner_ids, kinds=kinds, since=since, limit=limit)
     out: dict[str, Any] = {"ok": True, "count": len(entries), "entries": entries,
                            "note": f"Newest {len(entries)} entries; narrow with since=YYYY-MM-DD or kinds=[...] for more."}
+    if skipped:
+        out["areas_not_enabled"] = skipped
     if untrusted:
         out["content_notice"] = UNTRUSTED_NOTICE
     return out
@@ -661,12 +778,32 @@ def ping(client: OdooClient, settings: Settings | None = None) -> dict[str, Any]
     if settings is not None:
         out["write_enabled"] = settings.write_enabled
         out["write_tools"] = list(WRITE_TOOL_NAMES) if settings.write_enabled else []
+        if settings.unknown_areas:
+            out["unknown_areas"] = list(settings.unknown_areas)
+        if settings.config_errors:
+            out["config_errors"] = list(settings.config_errors)
+        if settings.revenue_range:
+            low, high = settings.revenue_range
+            out["revenue_range"] = [low, None if high == float("inf") else high]
+    out["enabled_areas"] = sorted(client.areas)
+    out["disabled_areas"] = [a for a in AREAS if a not in client.areas]
     try:
-        out["open_opportunities"] = client.search_count("crm.lead", [("type", "=", "opportunity")])
-        out["crm_installed"] = True
+        # ir.model is metadata: this proves the CRM app is installed without reading any CRM record.
+        out["crm_installed"] = client.search_count("ir.model", [("model", "=", "crm.lead")]) > 0
+        if out["crm_installed"] and client.area_enabled("crm"):
+            out["open_opportunities"] = client.search_count("crm.lead", [("type", "=", "opportunity")])
     except OdooError as exc:
         out["crm_installed"] = False
         out["crm_error"] = exc.to_dict()
+    if settings is not None and settings.custom_fields and out.get("crm_installed"):
+        custom, rejected = custom_lead_fields(client, settings)
+        out["custom_fields"] = custom
+        if rejected:
+            out["custom_fields_rejected"] = rejected
+    if not client.areas:
+        out["note"] = ("No data area is enabled, so the assistant reads nothing from Odoo yet. Enable the checked "
+                       "areas, e.g. `hermes config set plugins.entries.alfred-odoo.settings.enabled_areas "
+                       "'[\"crm\", \"contacts\"]'`, then restart the gateway.")
     return out
 
 

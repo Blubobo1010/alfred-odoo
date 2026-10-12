@@ -6,7 +6,7 @@ import alfred_odoo
 import pytest
 from alfred_odoo import settings as settings_mod
 from alfred_odoo.approvals import WRITE_TOOLS, pre_tool_call
-from conftest import FakeCtx
+from conftest import ALL_AREAS, FakeCtx
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,7 +49,7 @@ def test_check_fn_false_without_env_true_with(monkeypatch):
 
 
 def test_advanced_tools_gated_by_setting(configured):
-    ctx = FakeCtx(config={"advanced_tools": False})
+    ctx = FakeCtx(config={"advanced_tools": False, "enabled_areas": ALL_AREAS})
     alfred_odoo.register(ctx)
     assert ctx.tools["odoo_query"]["check_fn"]() is False
     assert ctx.tools["odoo_search_leads"]["check_fn"]() is True
@@ -58,7 +58,7 @@ def test_advanced_tools_gated_by_setting(configured):
 
 
 def test_write_tools_gated_by_setting(configured):
-    ctx = FakeCtx()
+    ctx = FakeCtx({"enabled_areas": ALL_AREAS})
     alfred_odoo.register(ctx)
     for name in WRITE_TOOLS:
         assert ctx.tools[name]["check_fn"]() is False

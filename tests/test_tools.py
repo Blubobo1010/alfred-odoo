@@ -167,11 +167,11 @@ def test_log_note_posts_escaped_html_note(configured_writes):
 def test_log_note_on_odoo_16_sends_html_without_the_17_flag(configured, monkeypatch):
     from alfred_odoo import client as client_mod
     from alfred_odoo import settings as settings_mod
-    from conftest import FakeCtx, FakeOdoo
+    from conftest import ALL_AREAS, FakeCtx, FakeOdoo
 
     fake16 = FakeOdoo(version=16)
     monkeypatch.setattr(client_mod, "default_transport", fake16)
-    settings_mod.bind_context(FakeCtx({"write_enabled": True}))
+    settings_mod.bind_context(FakeCtx({"write_enabled": True, "enabled_areas": ALL_AREAS}))
     assert call(tools.odoo_log_note, lead_id=10, note="hi")["ok"]
     kwargs = fake16.writes[0][3]
     assert kwargs["body"] == "<p>hi</p>" and "body_is_html" not in kwargs

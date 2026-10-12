@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from .client import OdooClient, OdooError
+from .client import OdooClient, OdooError, normalize_areas
 
 REQUIRED_ENV = ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY")
 
@@ -48,10 +49,52 @@ class Settings:
     max_body_chars: int = 800
     advanced_tools: bool = False
     write_enabled: bool = False
+    enabled_areas: frozenset[str] = frozenset()
+    unknown_areas: tuple[str, ...] = ()
+    revenue_range: tuple[float, float] | None = None
+    custom_fields: tuple[tuple[str, str], ...] = ()
+    config_errors: tuple[str, ...] = ()
+
+
+_LABEL = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
+_FIELD = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+
+
+def parse_revenue_range(value: Any) -> tuple[float, float] | None:
+    """``revenue_range`` setting ([min, max] or "min,max") -> bounds; empty = no plausibility check.
+    A max of 0 means no upper bound."""
+    if isinstance(value, str):
+        value = [v for v in value.split(",") if v.strip()]
+    if not value:
+        return None
+    if len(value) != 2:
+        raise OdooError("bad_config", "revenue_range must be two numbers: [min, max]")
+    low, high = float(value[0]), float(value[1])
+    if low < 0 or (high and high <= low):
+        raise OdooError("bad_config", "revenue_range needs 0 <= min < max (max 0 = no upper bound)")
+    return low, high or float("inf")
+
+
+def parse_custom_fields(value: Any) -> tuple[tuple[str, str], ...]:
+    """``custom_fields`` setting (["label=field", ...] or "label=field,...") -> ((label, field), ...)."""
+    if isinstance(value, str):
+        value = value.split(",")
+    out: dict[str, str] = {}
+    for item in value or []:
+        label, sep, field = str(item).partition("=")
+        label, field = label.strip().lower(), field.strip()
+        if not sep or not _LABEL.match(label) or not _FIELD.match(field):
+            raise OdooError("bad_config", f"custom_fields entry {str(item)!r} must look like label=field_name")
+        out[label] = field
+    return tuple(out.items())
 
 
 def load_settings() -> Settings:
     ids = setting("company_ids", []) or []
+    areas, unknown = normalize_areas(setting("enabled_areas", []))
+    errors: list[str] = []
+    revenue_range = _parsed(parse_revenue_range, setting("revenue_range", []), None, errors)
+    custom_fields = _parsed(parse_custom_fields, setting("custom_fields", []), (), errors)
     return Settings(
         default_limit=int(setting("default_limit", 20) or 20),
         timezone=str(setting("timezone", "") or ""),
@@ -62,7 +105,21 @@ def load_settings() -> Settings:
         max_body_chars=int(setting("max_body_chars", 800) or 800),
         advanced_tools=bool(setting("advanced_tools", False)),
         write_enabled=bool(setting("write_enabled", False)),
+        enabled_areas=areas,
+        unknown_areas=unknown,
+        revenue_range=revenue_range,
+        custom_fields=custom_fields,
+        config_errors=tuple(errors),
     )
+
+
+def _parsed(parse: Any, value: Any, fallback: Any, errors: list[str]) -> Any:
+    """A malformed optional setting must not hide the tools (check_fn) but must fail the call loudly."""
+    try:
+        return parse(value)
+    except (OdooError, ValueError, TypeError) as exc:
+        errors.append(getattr(exc, "message", None) or str(exc))
+        return fallback
 
 
 def is_configured() -> bool:
@@ -73,12 +130,34 @@ def is_configured() -> bool:
         return False
 
 
+def tool_check(*areas: str, any_of: bool = False, advanced: bool = False, write: bool = False):
+    """check_fn for a tool: credentials present, its data areas enabled, and the advanced/write opt-ins.
+    Never touches the network (Hermes caches tool availability)."""
+
+    def check() -> bool:
+        if not is_configured():
+            return False
+        s = load_settings()
+        if advanced and not s.advanced_tools:
+            return False
+        if write and not s.write_enabled:
+            return False
+        if not areas:
+            return bool(s.enabled_areas)
+        wanted = set(areas)
+        return bool(wanted & s.enabled_areas) if any_of else wanted <= s.enabled_areas
+
+    check.areas = frozenset(areas)  # type: ignore[attr-defined]  # introspected by tests
+    check.write = write  # type: ignore[attr-defined]
+    return check
+
+
 def advanced_enabled() -> bool:
     return is_configured() and load_settings().advanced_tools
 
 
 def write_enabled() -> bool:
-    """check_fn of the write tools: hidden from the model until the operator opts in."""
+    """Writes opted in by the operator (the write tools' check_fn also requires their areas)."""
     return is_configured() and load_settings().write_enabled
 
 
@@ -90,7 +169,7 @@ def make_client(settings: Settings | None = None) -> OdooClient:
         raise OdooError("not_configured", "Odoo credentials are missing: " + ", ".join(missing),
                         "Set them in the Hermes .env (hermes plugins install prompts for them) and restart the gateway.")
     return OdooClient(values["ODOO_URL"], values["ODOO_DB"], values["ODOO_USERNAME"], values["ODOO_API_KEY"],
-                      timeout=settings.timeout_seconds)
+                      areas=settings.enabled_areas, timeout=settings.timeout_seconds)
 
 
 def call_context(client: OdooClient, settings: Settings, **extra: Any) -> dict[str, Any]:

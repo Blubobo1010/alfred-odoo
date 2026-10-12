@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 from alfred_odoo import domains
-from alfred_odoo.client import OdooClient, OdooError
+from alfred_odoo.client import AREAS, OdooClient, OdooError
 from conftest import FakeOdoo
 
 
@@ -53,7 +53,7 @@ def test_lead_domain_resolves_names_17(client):
 
 
 def test_lead_domain_16_has_no_won_status():
-    client16 = OdooClient("https://odoo.test", "demo", "admin", "test-key", transport=FakeOdoo(version=16))
+    client16 = OdooClient("https://odoo.test", "demo", "admin", "test-key", areas=AREAS, transport=FakeOdoo(version=16))
     domain, _, _ = domains.lead_domain(client16, {"status": "open"})
     assert ("stage_id.is_won", "=", False) in domain
     assert not any(t[0] == "won_status" for t in domain if isinstance(t, tuple))

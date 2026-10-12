@@ -1,5 +1,5 @@
 name: alfred-odoo
-version: 0.2.1
+version: 0.3.0
 manifest_version: 2
 api_version: 1
 label: "Odoo CRM"
@@ -37,6 +37,21 @@ provides_tools:
 provides_hooks:
   - pre_tool_call
 config_schema:
+  enabled_areas:
+    type: list
+    default: []
+    label: "Enabled Odoo data areas"
+    description: "Default-deny: the assistant reads (and writes) only these areas — crm (leads, stages, teams, tags), contacts (res.partner), activities, chatter (messages, notes, stage history). Enable an area only after checking its data with the customer; empty = nothing is read"
+  revenue_range:
+    type: list
+    default: []
+    label: "Plausible expected revenue range"
+    description: "[min, max] in company currency (max 0 = no upper bound). Amounts outside it are flagged as suspect and left out of pipeline sums; empty = no check. Kimera: [100000, 2000000]"
+  custom_fields:
+    type: list
+    default: []
+    label: "Extra opportunity fields"
+    description: "label=field entries for crm.lead fields to show on leads and group the pipeline by, e.g. [\"model=x_studio_modello_auto_1\"]. Plain or many2one fields only"
   default_limit:
     type: int
     default: 20

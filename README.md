@@ -22,7 +22,32 @@ The installer asks for four values and stores them in your Hermes `.env`:
 | `ODOO_USERNAME` | Login of the Odoo user the assistant acts as |
 | `ODOO_API_KEY` | API key of that user (Odoo → avatar → My Profile → Account Security → New API Key) |
 
-Then run `alfred odoo test` and restart the gateway (`alfred gateway restart`).
+Then enable the data areas (next section), run `alfred odoo test` and restart the gateway
+(`alfred gateway restart`).
+
+### Data areas (default-deny)
+
+Out of the box the assistant reads **nothing** from Odoo. Every model belongs to a data area and
+an area is used only once the operator enables it, after checking with the customer that its data
+is clean enough to answer from (a well-formatted number that is wrong is worse than no number):
+
+| Area | Models | Tools |
+|---|---|---|
+| `crm` | `crm.lead`, `crm.stage`, `crm.team`, `crm.tag`, `crm.lost.reason` | vocabulary, search/get lead, pipeline summary |
+| `contacts` | `res.partner` | `odoo_search_partners` |
+| `activities` | `mail.activity`, `mail.activity.type` | `odoo_list_activities`, activities in timelines |
+| `chatter` | `mail.message`, `mail.tracking.value` | emails, notes and stage history in timelines |
+
+```bash
+alfred config set plugins.entries.alfred-odoo.settings.enabled_areas crm,contacts
+alfred gateway restart
+```
+
+A tool whose area is off is not offered to the model; if a call still reaches a disabled area the
+client refuses it (`area_not_enabled`) before anything is sent to Odoo. Users, companies,
+currencies and model ids are always readable (session metadata), and `alfred odoo fields <model>`
+works on every model so you can inspect an area before enabling it. `alfred odoo test` lists the
+enabled and disabled areas.
 
 ### Recommended Odoo setup
 
@@ -50,7 +75,15 @@ notes and activities appear under its name).
 
 Settings (Desktop → Plugins → Odoo CRM, or `alfred config set plugins.entries.alfred-odoo.settings.<key> <value>`): `default_limit`,
 `timezone`, `lang`, `company_ids`, `default_team`, `timeout_seconds`, `max_body_chars`,
-`advanced_tools`, `write_enabled`.
+`advanced_tools`, `write_enabled`, `enabled_areas`, `revenue_range`, `custom_fields`.
+
+- `revenue_range` (`min,max`, max 0 = no upper bound): expected revenues outside it are flagged
+  `suspect` on leads, counted but left out of `odoo_pipeline_summary` sums, and listed under
+  `suspect_amounts` (typos such as 880 for 880,000). With a range set the summary aggregates up to
+  5,000 matching leads client-side and says `truncated` beyond that.
+- `custom_fields` (`label=field,...`): company-specific `crm.lead` fields (plain or many2one) shown
+  on leads under `custom_fields` and usable as `group_by` labels, e.g.
+  `alfred config set plugins.entries.alfred-odoo.settings.custom_fields model=x_studio_modello_auto_1`.
 
 ## Writes (opt-in)
 

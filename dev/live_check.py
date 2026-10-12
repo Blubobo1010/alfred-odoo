@@ -10,22 +10,33 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class _WritesCtx:
-    """Stands in for the Hermes PluginContext so the write tools see write_enabled: true."""
+# Data areas the check enables (default: all). LIVE_AREAS=crm,contacts checks a restricted setup.
+AREAS = os.environ.get("LIVE_AREAS", "crm,contacts,activities,chatter")
+# Optional data rules, e.g. LIVE_REVENUE_RANGE=100000,2000000 LIVE_CUSTOM_FIELDS=model=x_studio_modello_auto_1
+RULES = {k: os.environ[v] for k, v in (("revenue_range", "LIVE_REVENUE_RANGE"), ("custom_fields", "LIVE_CUSTOM_FIELDS"))
+         if os.environ.get(v)}
+
+
+class _Ctx:
+    """Stands in for the Hermes PluginContext: the areas above, writes on only when asked."""
+
+    def __init__(self, writes: bool = False):
+        self.values = {"enabled_areas": AREAS, "write_enabled": writes, **RULES}
 
     def get_config(self, key, default=None):
-        return True if key == "write_enabled" else default
+        return self.values.get(key, default)
 
 
 def check_writes(tools, settings, lead_id: int) -> int:
     """Run the three write tools on ``lead_id`` and restore its stage; returns the failure count."""
-    settings.bind_context(_WritesCtx())
+    settings.bind_context(_Ctx(writes=True))
     failures = 0
     before = json.loads(tools.odoo_get_lead({"lead_id": lead_id, "include_timeline": False}))["lead"]
     vocab = json.loads(tools.odoo_crm_vocabulary({"include": ["stages"]}))
@@ -62,7 +73,8 @@ def main() -> int:
     load()
     tools = sys.modules["alfred_odoo.tools"]
     settings = sys.modules["alfred_odoo.settings"]
-    print("ping:", json.dumps(tools.ping(settings.make_client()), ensure_ascii=False))
+    settings.bind_context(_Ctx())
+    print("ping:", json.dumps(tools.ping(settings.make_client(), settings.load_settings()), ensure_ascii=False))
     calls = [
         ("odoo_crm_vocabulary", {}),
         ("odoo_search_leads", {"limit": 3}),
