@@ -1,7 +1,7 @@
 """alfred-odoo — Odoo CRM tools for Hermes / Alfred: read tools plus three opt-in, human-approved writes.
 
 Everything here registers synchronously and without I/O: Hermes loads plugins at startup and
-``hermes plugins doctor`` runs ``register()`` with the network blocked. Availability is decided
+``alfred plugins doctor`` runs ``register()`` with the network blocked. Availability is decided
 per call by ``check_fn`` (credentials present, the tool's data areas enabled, writes enabled) —
 never by skipping a registration. Data areas are default-deny (``enabled_areas``, see client.py).
 """

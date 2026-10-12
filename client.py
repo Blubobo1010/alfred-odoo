@@ -215,7 +215,7 @@ def map_error(payload: dict[str, Any], secret: str = "") -> OdooError:
     low = (message + " " + name + " " + debug).lower()
     if "accessdenied" in name.lower() or "access denied" in low:
         return OdooError("auth_failed", message, "Check ODOO_USERNAME and ODOO_API_KEY (Odoo 18 keys can expire); "
-                         "run `hermes odoo test`.")
+                         "run `alfred odoo test`.")
     if "accesserror" in name.lower():
         return OdooError("access_denied", message, "The Odoo user lacks access to this model or operation "
                          "(access rights, record rules or multi-company).")
@@ -226,7 +226,7 @@ def map_error(payload: dict[str, Any], secret: str = "") -> OdooError:
         return OdooError("model_not_installed", message, "Is the CRM app installed on this Odoo?")
     if "invalid field" in low or "unknown field" in low:
         return OdooError("invalid_field", message, "Call odoo_describe_model(model) to list valid fields "
-                         "(or `hermes odoo fields <model>`).")
+                         "(or `alfred odoo fields <model>`).")
     if "database" in low and ("does not exist" in low or "not exist" in low):
         return OdooError("bad_database", message, "Check ODOO_DB.")
     return OdooError("odoo_error", message[:300])

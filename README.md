@@ -10,7 +10,7 @@ Enterprise, self-hosted, odoo.sh or Odoo Online on a plan that allows the extern
 
 ```bash
 alfred plugins install Blubobo1010/alfred-odoo --enable
-# or: hermes plugins install Blubobo1010/alfred-odoo --enable
+# or: alfred plugins install Blubobo1010/alfred-odoo --enable
 ```
 
 The installer asks for these values and stores them in your Hermes `.env`:
@@ -133,8 +133,8 @@ model asks for.
 ```bash
 uv run --no-project --with pytest pytest -q tests   # unit tests on fake JSON-2 and JSON-RPC transports
 uvx ruff check .
-hermes plugins doctor . --ci      # real plugin loading with the network blocked
-hermes plugins validate .         # manifest + security scan (must be "safe")
+alfred plugins doctor . --ci      # real plugin loading with the network blocked
+alfred plugins validate .         # manifest + security scan (must be "safe")
 docker compose -f dev/docker-compose.yml up   # Odoo 17 demo database for manual testing
 uv run --no-project python dev/live_check.py --writes   # every tool against it, writes included
 ```

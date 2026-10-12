@@ -186,7 +186,7 @@ def make_client(settings: Settings | None = None) -> OdooClient:
     missing = [n for n in needed if not values[n]]
     if missing:
         raise OdooError("not_configured", "Odoo credentials are missing: " + ", ".join(missing),
-                        "Set them in the Hermes .env (hermes plugins install prompts for them) and restart the gateway.")
+                        "Set them in the Alfred .env (alfred plugins install prompts for them) and restart the gateway.")
     return OdooClient(values["ODOO_URL"], values["ODOO_DB"], values["ODOO_USERNAME"], values["ODOO_API_KEY"],
                       areas=settings.enabled_areas, timeout=settings.timeout_seconds, protocol=protocol)
 

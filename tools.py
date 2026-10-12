@@ -654,7 +654,7 @@ def _require_write(settings: Settings) -> None:
     if not settings.write_enabled:
         raise OdooError("writes_disabled", "Odoo writes are disabled for this assistant",
                         "The operator can enable them with write_enabled: true (Desktop plugin settings or "
-                        "`hermes config set plugins.entries.alfred-odoo.settings.write_enabled true`).")
+                        "`alfred config set plugins.entries.alfred-odoo.settings.write_enabled true`).")
 
 
 def _load_lead(client: OdooClient, settings: Settings, args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -769,7 +769,7 @@ def odoo_update_lead_stage(client: OdooClient, settings: Settings, args: dict[st
 
 
 def ping(client: OdooClient, settings: Settings | None = None) -> dict[str, Any]:
-    """Used by `hermes odoo test`: authenticate and describe what the connection can see."""
+    """Used by `alfred odoo test`: authenticate and describe what the connection can see."""
     version = client.version()
     user = client.user_context()
     try:
@@ -811,7 +811,7 @@ def ping(client: OdooClient, settings: Settings | None = None) -> dict[str, Any]
             out["custom_fields_rejected"] = rejected
     if not client.areas:
         out["note"] = ("No data area is enabled, so the assistant reads nothing from Odoo yet. Enable the checked "
-                       "areas, e.g. `hermes config set plugins.entries.alfred-odoo.settings.enabled_areas "
+                       "areas, e.g. `alfred config set plugins.entries.alfred-odoo.settings.enabled_areas "
                        "'[\"crm\", \"contacts\"]'`, then restart the gateway.")
     return out
 

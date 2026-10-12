@@ -2,14 +2,14 @@ alfred-odoo is installed (Odoo CRM tools, toolset `odoo`). It reads nothing unti
 areas, and writes nothing until you enable writes.
 
 Next steps:
-1. `hermes odoo test` — authenticates with the credentials you just entered and reports the API in
+1. `alfred odoo test` — authenticates with the credentials you just entered and reports the API in
    use (JSON-2 or JSON-RPC, plugin setting `api`), the Odoo version, the connected user, its companies, whether the CRM is reachable and whether writes are on.
 2. Enable the data areas you have checked with the customer (default: none):
-   `hermes config set plugins.entries.alfred-odoo.settings.enabled_areas crm,contacts`
+   `alfred config set plugins.entries.alfred-odoo.settings.enabled_areas crm,contacts`
    Areas: `crm` (leads, stages, teams, tags), `contacts`, `activities`, `chatter` (messages, notes,
    stage history). A tool whose area is off is not offered to the model.
-3. Restart the gateway if it is running (`hermes gateway restart`) so the tools load there too.
-4. Optional settings (Desktop → Plugins → Odoo CRM, or `hermes config set plugins.entries.alfred-odoo.settings.<key> <value>`):
+3. Restart the gateway if it is running (`alfred gateway restart`) so the tools load there too.
+4. Optional settings (Desktop → Plugins → Odoo CRM, or `alfred config set plugins.entries.alfred-odoo.settings.<key> <value>`):
    default_limit, timezone, default_team, advanced_tools, write_enabled, enabled_areas,
    revenue_range (min,max: implausible amounts kept out of totals), custom_fields (label=field, e.g. model=x_studio_modello_auto_1).
 

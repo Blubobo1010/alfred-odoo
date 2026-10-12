@@ -1,4 +1,4 @@
-"""`hermes odoo test | fields <model> | whoami` — connection checks for the operator."""
+"""`alfred odoo test | fields <model> | whoami` — connection checks for the operator."""
 
 from __future__ import annotations
 
