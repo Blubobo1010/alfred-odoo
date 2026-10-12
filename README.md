@@ -2,9 +2,9 @@
 
 Odoo CRM tools for [Alfred](https://github.com/Blubobo1010/Alfred-Ai-Audit) / Hermes Agent:
 leads and opportunities, pipeline summaries, customers, activities and chatter, over Odoo's
-JSON-RPC API, plus three opt-in writes (internal note, scheduled activity, stage change) that a
-human approves one by one. Works with Odoo 16, 17 and 18 (Community or Enterprise, self-hosted,
-odoo.sh or Odoo Online on a plan that allows the external API).
+JSON-2 API (Odoo 18 Online, 19+) or the classic JSON-RPC API (Odoo 16-18), plus three opt-in writes
+(internal note, scheduled activity, stage change) that a human approves one by one. Community or
+Enterprise, self-hosted, odoo.sh or Odoo Online on a plan that allows the external API.
 
 ## Install
 
@@ -13,14 +13,21 @@ alfred plugins install Blubobo1010/alfred-odoo --enable
 # or: hermes plugins install Blubobo1010/alfred-odoo --enable
 ```
 
-The installer asks for four values and stores them in your Hermes `.env`:
+The installer asks for these values and stores them in your Hermes `.env`:
 
-| Variable | Value |
-|---|---|
-| `ODOO_URL` | Base URL, e.g. `https://mycompany.odoo.com` |
-| `ODOO_DB` | Database name |
-| `ODOO_USERNAME` | Login of the Odoo user the assistant acts as |
-| `ODOO_API_KEY` | API key of that user (Odoo → avatar → My Profile → Account Security → New API Key) |
+| Variable | JSON-2 | JSON-RPC | Value |
+|---|---|---|---|
+| `ODOO_URL` | required | required | Base URL, e.g. `https://mycompany.odoo.com` |
+| `ODOO_API_KEY` | required | required | API key of the user the assistant acts as (Odoo → avatar → My Profile → Account Security → New API Key) |
+| `ODOO_DB` | multi-database servers only | required | Database name |
+| `ODOO_USERNAME` | recommended | required | Login of that user; with JSON-2 it lets "me" filters find the user |
+
+The plugin setting `api` picks the wire: `json2` (`POST /json/2/<model>/<method>`, key as bearer),
+`jsonrpc` (`/jsonrpc`, database + login + key), or `auto` (default: JSON-RPC when `ODOO_DB` and
+`ODOO_USERNAME` are both set, JSON-2 otherwise). `alfred odoo test` reports which one is in use; on
+an Odoo without JSON-2 the error `json2_unavailable` says to switch to `jsonrpc`.
+The installer prompts only for the two required values: for JSON-RPC (or the JSON-2 login) add
+`ODOO_DB=…` / `ODOO_USERNAME=…` to the Hermes `.env` (`~/.hermes/.env`, or the profile's).
 
 Then enable the data areas (next section), run `alfred odoo test` and restart the gateway
 (`alfred gateway restart`).
@@ -112,8 +119,8 @@ model asks for.
 
 ## What this plugin does on your machine
 
-- Makes HTTPS requests only to `ODOO_URL` (`/jsonrpc`); plain `http://` is accepted for
-  localhost and private networks only.
+- Makes HTTPS requests only to `ODOO_URL` (`/json/2/…` and the public `/web/webclient/version_info`,
+  or `/jsonrpc`); plain `http://` is accepted for localhost and private networks only.
 - Reads through read methods only (`search_read`, `read`, `search_count`, `read_group`,
   `fields_get`, `name_search`) on an allow-list of CRM, partner, user and mail models.
 - Writes, when enabled, only through the three operations above, each gated by the human
@@ -124,7 +131,7 @@ model asks for.
 ## Development
 
 ```bash
-uv run --no-project --with pytest pytest -q tests   # unit tests with a fake JSON-RPC transport
+uv run --no-project --with pytest pytest -q tests   # unit tests on fake JSON-2 and JSON-RPC transports
 uvx ruff check .
 hermes plugins doctor . --ci      # real plugin loading with the network blocked
 hermes plugins validate .         # manifest + security scan (must be "safe")

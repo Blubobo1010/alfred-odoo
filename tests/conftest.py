@@ -26,7 +26,7 @@ _load_package()
 
 from alfred_odoo import client as client_mod  # noqa: E402
 from alfred_odoo import settings as settings_mod  # noqa: E402
-from alfred_odoo.client import AREAS, OdooClient  # noqa: E402
+from alfred_odoo.client import AREAS, JSON2_ARGS, OdooClient  # noqa: E402
 
 ALL_AREAS = list(AREAS)
 
@@ -83,7 +83,8 @@ USERS = [{"id": 2, "name": "Marc Demo", "tz": "Europe/Rome", "lang": "it_IT", "c
 
 
 class FakeOdoo:
-    """Answers JSON-RPC payloads from in-memory tables and records every call."""
+    """Answers JSON-RPC payloads (``__call__``) and JSON-2 requests (``json2``) from in-memory tables
+    and records every call."""
 
     def __init__(self, *, version: int = 17, uid: int | None = 2, api_key: str = "test-key"):
         self.version = version
@@ -94,6 +95,7 @@ class FakeOdoo:
         self.leads = [dict(lead) for lead in LEADS]  # per-test copy: writes mutate it
         self.fields = FIELDS_17 if version >= 17 else FIELDS_16
         self.fail_next: dict | None = None
+        self.context_uid = True  # False = an Odoo whose context_get omits the uid (JSON-2 then needs the login)
 
     def __call__(self, url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
         params = payload["params"]
@@ -114,6 +116,34 @@ class FakeOdoo:
             err, self.fail_next = self.fail_next, None
             return {"error": err}
         return {"result": self._dispatch(model, odoo_method, margs, mkwargs)}
+
+    def json2(self, url: str, body: dict[str, Any], headers: dict[str, str], timeout: float) -> tuple[int, Any]:
+        """JSON-2: bearer key, named arguments; errors as HTTP status + Odoo's JSON error body."""
+        self.last_json2 = (url, dict(body), dict(headers))
+        path = url.split("://", 1)[1].split("/", 1)[1]
+        if path == "web/webclient/version_info":
+            self.calls.append(("common", "version", None, None))
+            info = ["saas~18", 2, 0, "final", 0, ""] if self.version == 18 else [self.version, 0, 0, "final", 0, ""]
+            return 200, {"jsonrpc": "2.0", "id": 1, "result": {"server_version": f"{self.version}.0", "server_version_info": info}}
+        _json, _two, model, method = path.split("/")
+        self.calls.append(("json2", "call", model, method))
+        if headers.get("Authorization") != f"bearer {self.api_key}":
+            return 401, {"name": "werkzeug.exceptions.Unauthorized", "message": "Invalid apikey"}
+        if self.fail_next:
+            err, self.fail_next = self.fail_next, None
+            return 422, err.get("data", err)
+        body = dict(body)
+        args = [body.pop(n) for n in JSON2_ARGS[method] if n in body]
+        if method == "create":
+            args = [args[0][0]]  # the plugin always creates one record
+        if model == "res.users" and method == "context_get":  # Odoo 19 includes the key's uid
+            return 200, {"lang": "it_IT", "tz": "Europe/Rome", **({"uid": self.uid} if self.context_uid else {})}
+        if model == "res.users" and method == "search_read" and args and args[0] and args[0][0][0] == "login":
+            return 200, [{"id": USERS[0]["id"]}]
+        try:
+            return 200, self._dispatch(model, method, args, body)
+        except AssertionError as exc:
+            return 404, {"name": "odoo.exceptions.MissingError", "message": str(exc)}
 
     def _dispatch(self, model: str, method: str, args: list, kwargs: dict) -> Any:
         if method == "fields_get":
@@ -212,14 +242,21 @@ def client(fake: FakeOdoo) -> OdooClient:
     return OdooClient("https://odoo.test", "demo", "admin", "test-key", areas=AREAS, transport=fake)
 
 
-@pytest.fixture
-def configured(monkeypatch, fake: FakeOdoo):
-    """Credentials in the environment + the fake transport wired into make_client, every data area enabled."""
+@pytest.fixture(params=["jsonrpc", "json2"])
+def configured(request, monkeypatch, fake: FakeOdoo):
+    """Credentials in the environment + the fake transports wired into make_client, every data area
+    enabled. Runs every test twice: JSON-RPC (database + login set) and JSON-2 (no database: ``api: auto``
+    picks JSON-2; the login stays set so the key's user is known)."""
     monkeypatch.setenv("ODOO_URL", "https://odoo.test")
-    monkeypatch.setenv("ODOO_DB", "demo")
     monkeypatch.setenv("ODOO_USERNAME", "admin")
     monkeypatch.setenv("ODOO_API_KEY", "test-key")
+    if request.param == "jsonrpc":
+        monkeypatch.setenv("ODOO_DB", "demo")
+    else:
+        monkeypatch.delenv("ODOO_DB", raising=False)
     monkeypatch.setattr(client_mod, "default_transport", fake)
+    monkeypatch.setattr(client_mod, "default_json2_transport", fake.json2)
+    fake.protocol = request.param
     settings_mod.bind_context(FakeCtx({"enabled_areas": ALL_AREAS}))
     return fake
 

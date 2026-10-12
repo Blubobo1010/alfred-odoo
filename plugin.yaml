@@ -1,9 +1,9 @@
 name: alfred-odoo
-version: 0.3.0
+version: 0.4.0
 manifest_version: 2
 api_version: 1
 label: "Odoo CRM"
-description: "Odoo 16/17/18 CRM over JSON-RPC: read leads and opportunities, pipeline by stage or salesperson, partners, activities and chatter; optionally log notes, schedule activities and move stages, each confirmed by a human."
+description: "Odoo 16-19 CRM over JSON-2 or JSON-RPC: read leads and opportunities, pipeline by stage or salesperson, partners, activities and chatter; optionally log notes, schedule activities and move stages, each confirmed by a human."
 author: Blubobo1010
 license: MIT
 homepage: https://github.com/Blubobo1010/alfred-odoo
@@ -13,14 +13,15 @@ requires_hermes: ">=0.21.6"
 requires_env:
   - name: ODOO_URL
     description: "Base URL of your Odoo, e.g. https://mycompany.odoo.com or https://erp.example.com"
-  - name: ODOO_DB
-    description: "Database name (odoo.sh: the branch's database; self-hosted: the name in the database selector)"
-  - name: ODOO_USERNAME
-    description: "Login of the Odoo user the assistant acts as (usually an email); a dedicated user with Sales / User rights only is recommended"
   - name: ODOO_API_KEY
-    description: "API key of that user: Odoo > avatar > My Profile > Account Security > New API Key"
-    url: https://www.odoo.com/documentation/17.0/developer/reference/external_api.html#api-keys
+    description: "API key of the Odoo user the assistant acts as (a dedicated read-only user is recommended): Odoo > avatar > My Profile > Account Security > New API Key"
+    url: https://www.odoo.com/documentation/19.0/developer/reference/external_api.html
     secret: true
+optional_env:
+  - name: ODOO_DB
+    description: "Database name. Required with the classic JSON-RPC API (Odoo 16/17, odoo.sh, self-hosted); with JSON-2 only on multi-database servers"
+  - name: ODOO_USERNAME
+    description: "Login of the key's user (usually an email). Required with JSON-RPC; with JSON-2 it lets 'me' filters find the user"
 provides_tools:
   - odoo_crm_vocabulary
   - odoo_search_leads
@@ -42,6 +43,11 @@ config_schema:
     default: []
     label: "Enabled Odoo data areas"
     description: "Default-deny: the assistant reads (and writes) only these areas — crm (leads, stages, teams, tags), contacts (res.partner), activities, chatter (messages, notes, stage history). Enable an area only after checking its data with the customer; empty = nothing is read"
+  api:
+    type: str
+    default: "auto"
+    label: "Odoo API"
+    description: "json2 (Odoo 18 Online / 19+: URL + API key only), jsonrpc (classic: also ODOO_DB and ODOO_USERNAME) or auto (jsonrpc when both are set, else json2)"
   revenue_range:
     type: list
     default: []

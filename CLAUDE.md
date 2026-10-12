@@ -6,13 +6,17 @@ repo È il pacchetto plugin (`plugin.yaml` + `__init__.py`); gli utenti lo insta
 `alfred plugins install Blubobo1010/alfred-odoo --enable`.
 
 ## Comandi
-- `uv run --no-project --with pytest pytest -q tests` — unit test con transport JSON-RPC finto (`tests/conftest.py`).
+- `uv run --no-project --with pytest pytest -q tests` — unit test con transport finti JSON-RPC e JSON-2 (`tests/conftest.py`;
+  la fixture `configured` fa girare ogni test su entrambi).
 - `uvx ruff check .`
 - Contratti Hermes reali: dall'albero Alfred `python -m hermes_cli.main plugins doctor <repo> --ci` e `plugins validate <repo>`
   (deve essere "safe": un verdetto "caution" fa fallire la CI).
 - Test live: `docker compose -f dev/docker-compose.yml up` (Odoo 17 demo, admin/admin come API key), poi
   `ODOO_URL=http://localhost:8069 ODOO_DB=demo ODOO_USERNAME=admin ODOO_API_KEY=admin uv run --no-project python dev/live_check.py`
   (`--writes` esercita anche le tre scritture su un lead demo e lo riporta allo stage iniziale).
+  JSON-2: stesso compose con `image: odoo:19` e `--with-demo` nel command (Odoo 17 non ha `/json/2`), chiave creata
+  con `odoo shell` (`env['res.users.apikeys'].with_user(env.ref('base.user_admin'))._generate(None, 'test', None)`),
+  poi `ODOO_URL=… ODOO_API_KEY=<chiave> LIVE_API=json2 … dev/live_check.py --writes` (niente DB né login).
 
 ## Invarianti
 - **Nessun `pyproject.toml`** nella root: Hermes lo legge come dichiarazione di dipendenze e chiede
@@ -29,6 +33,12 @@ repo È il pacchetto plugin (`plugin.yaml` + `__init__.py`); gli utenti lo insta
   `ir.model`) sono sempre leggibili. Il `check_fn` di ogni tool (`settings.tool_check`) richiede le sue aree;
   i tool che combinano più aree (`odoo_get_lead`, `odoo_timeline`, vocabolario) saltano le parti spente e
   le elencano in `areas_not_enabled`. Ripresa dal gate «Bivio B» di JarvisXCeo.
+- Due protocolli (setting `api`: `json2` | `jsonrpc` | `auto`), un solo punto di passaggio:
+  `OdooClient._call`. Sopra restano identici allow-list, gate per aree e helper. JSON-2 vuole argomenti
+  per nome: `client.JSON2_ARGS` dà i nomi dei posizionali di ogni metodo; un metodo assente è rifiutato,
+  quindi una scrittura nuova = anche la sua riga lì. Con JSON-2 l'utente della chiave arriva da
+  `context_get` o da `ODOO_USERNAME`; senza, `uid` solleva `unknown_user` e "me" non funziona.
+  Odoo Online riporta versioni `saas~18`: usare sempre `client.major_version`.
 - Regole dati per cliente, solo da setting (mai nomi di campi `x_studio_*` nel codice): `revenue_range`
   (importi fuori intervallo marcati `suspect`, esclusi dalle somme del riepilogo che in quel caso aggrega
   lato client fino a 5000 righe) e `custom_fields` (`label=campo`, solo scalari/many2one, mostrati sui

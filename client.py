@@ -1,4 +1,5 @@
-"""Minimal Odoo JSON-RPC client (stdlib only).
+"""Minimal Odoo client (stdlib only) over JSON-2 (Odoo 18 saas / 19+: ``/json/2/<model>/<method>``,
+API key as bearer) or the classic JSON-RPC (``/jsonrpc``, database + login + key).
 
 Reads go through ``execute_kw`` with a method allow-list and a model allow-list, so a misused
 read tool still cannot write to Odoo. On top of that every model belongs to a data *area*
@@ -25,9 +26,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 READ_METHODS = frozenset({"search_read", "read", "search", "search_count", "read_group", "fields_get", "name_search"})
+# Read methods allowed on one model only.
+EXTRA_READS = frozenset({("res.users", "context_get")})
+PROTOCOLS = ("json2", "jsonrpc")
 
 # Data areas: records of these models are only touched when the area is in ``enabled_areas``.
 AREA_MODELS: dict[str, frozenset[str]] = {
@@ -51,6 +55,17 @@ LEAD_WRITABLE_FIELDS = frozenset({"stage_id"})
 
 FIELDS_TTL_SECONDS = 600
 Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]
+# JSON-2: (url, body, headers, timeout) -> (HTTP status, parsed JSON body or None when not JSON).
+Json2Transport = Callable[[str, dict[str, Any], dict[str, str], float], tuple[int, Any]]
+
+# JSON-2 takes named arguments only: the names of each method's positional arguments, in order.
+# A method missing here cannot be sent over JSON-2 (a new write needs its entry too).
+JSON2_ARGS: dict[str, tuple[str, ...]] = {
+    "search_read": ("domain",), "search_count": ("domain",), "search": ("domain",), "read_group": ("domain",),
+    "read": ("ids",), "name_search": ("name",), "fields_get": (), "context_get": (),
+    "message_post": ("ids",), "write": ("ids", "vals"), "create": ("vals_list",),
+}
+VERSION_PATH = "/web/webclient/version_info"
 
 
 class OdooError(Exception):
@@ -119,6 +134,38 @@ def default_transport(url: str, payload: dict[str, Any], timeout: float) -> dict
                         "Check that ODOO_URL is the base URL of an Odoo instance.") from exc
 
 
+def default_json2_transport(url: str, body: dict[str, Any], headers: dict[str, str], timeout: float) -> tuple[int, Any]:
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - https/loopback enforced by caller
+            status, raw = resp.status, resp.read()
+    except urllib.error.HTTPError as exc:  # 4xx/5xx carry Odoo's JSON error body
+        status, raw = exc.code, exc.read()
+    try:
+        return status, json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return status, None
+
+
+def json2_body(method: str, args: list[Any], kwargs: dict[str, Any] | None) -> dict[str, Any]:
+    """Positional ``args`` + ``kwargs`` of an ``execute_kw`` call -> the named JSON-2 body."""
+    names = JSON2_ARGS.get(method)
+    if names is None or len(args) > len(names):
+        raise OdooError("unsupported_method", f"{method} cannot be called over JSON-2 by this plugin")
+    body = dict(zip(names, args, strict=False))
+    if method == "create" and isinstance(body.get("vals_list"), dict):
+        body["vals_list"] = [body["vals_list"]]
+    body.update(kwargs or {})
+    return body
+
+
+def major_version(info: Any) -> int:
+    """First element of ``server_version_info``: 17, or "saas~18" on Odoo Online -> 18."""
+    first = (info or [0])[0] if isinstance(info, list | tuple) else info
+    digits = "".join(ch for ch in str(first).split(".")[0] if ch.isdigit())
+    return int(digits) if digits else 0
+
+
 def normalize_url(url: str) -> str:
     url = (url or "").strip().rstrip("/")
     for suffix in ("/web", "/odoo", "/jsonrpc", "/xmlrpc"):
@@ -185,19 +232,53 @@ def map_error(payload: dict[str, Any], secret: str = "") -> OdooError:
     return OdooError("odoo_error", message[:300])
 
 
+def map_json2_error(status: int, body: Any, secret: str = "") -> OdooError:
+    """Translate a JSON-2 HTTP error (status + Odoo's JSON error body) into a stable error code.
+    Only the error ``name`` and ``message`` are used; ``debug`` and ``arguments`` never leave here."""
+    if not isinstance(body, dict):
+        if status == 404:
+            return OdooError("json2_unavailable", "this Odoo does not expose the JSON-2 API (HTTP 404)",
+                             "Odoo before 18 (Online) / 19 has no JSON-2: set the plugin setting api to jsonrpc "
+                             "and ODOO_DB / ODOO_USERNAME.")
+        if status in (429, 502, 503, 504):
+            return OdooError("rate_limited", f"Odoo answered HTTP {status}", retryable=True)
+        return OdooError("odoo_error", f"HTTP {status} from Odoo")
+    if status == 401:
+        return OdooError("auth_failed", _scrub(str(body.get("message") or "invalid API key"), secret),
+                         "The API key is wrong, expired or revoked (Odoo keys have an expiry date): create a new "
+                         "one in Odoo > My Profile > Account Security and update ODOO_API_KEY.")
+    err = map_error({"error": {"data": {"name": body.get("name"), "message": body.get("message")}}}, secret)
+    if err.code == "odoo_error":
+        if status == 403:
+            return OdooError("access_denied", err.message, "The Odoo user of this key lacks access to this model or operation.")
+        if status == 404:
+            return OdooError("model_not_installed", err.message, "The model or method does not exist on this Odoo.")
+        if status >= 500:
+            return OdooError("rate_limited" if status in (502, 503, 504) else "odoo_error", err.message,
+                             retryable=status in (502, 503, 504))
+    return err
+
+
 class OdooClient:
     def __init__(self, url: str, db: str, username: str, api_key: str, *, areas: Any = (),
-                 timeout: float = 20.0, transport: Transport | None = None):
+                 timeout: float = 20.0, transport: Transport | None = None, protocol: str = "jsonrpc",
+                 json2_transport: Json2Transport | None = None):
         self.url = normalize_url(url)
-        self.db = db.strip()
-        self.username = username.strip()
-        self._api_key = api_key
+        self.db = (db or "").strip()
+        self.username = (username or "").strip()
+        self._api_key = (api_key or "").strip()  # a stray newline in a header would leak the key in errors
         self.timeout = float(timeout)
+        if protocol not in PROTOCOLS:
+            raise OdooError("bad_config", f"api must be one of {', '.join(PROTOCOLS)}")
+        self.protocol = protocol
         self._transport = transport or default_transport
+        self._json2_transport = json2_transport or default_json2_transport
         self.areas, _ = normalize_areas(areas)
-        self._key = hashlib.sha256(f"{self.url}|{self.db}|{self.username}|{api_key}".encode()).hexdigest()
-        if not (self.db and self.username and api_key):
-            raise OdooError("not_configured", "ODOO_DB, ODOO_USERNAME and ODOO_API_KEY must all be set")
+        self._key = hashlib.sha256(f"{protocol}|{self.url}|{self.db}|{self.username}|{api_key}".encode()).hexdigest()
+        if not self._api_key:
+            raise OdooError("not_configured", "ODOO_API_KEY must be set")
+        if protocol == "jsonrpc" and not (self.db and self.username):
+            raise OdooError("not_configured", "JSON-RPC needs ODOO_DB and ODOO_USERNAME (or use the JSON-2 API)")
 
     # ---- plumbing ---------------------------------------------------------------------------
 
@@ -228,25 +309,59 @@ class OdooClient:
             raise map_error(response, self._api_key)
         return response.get("result")
 
+    def _json2(self, path: str, body: dict[str, Any], *, auth: bool = True) -> Any:
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "User-Agent": f"alfred-odoo/{__version__}"}
+        if auth:
+            headers["Authorization"] = f"bearer {self._api_key}"
+        if self.db:
+            headers["X-Odoo-Database"] = self.db
+        try:
+            status, data = self._json2_transport(f"{self.url}{path}", body, headers, self.timeout)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            reason = getattr(exc, "reason", exc)
+            code = "timeout" if "timed out" in str(reason).lower() else "unreachable"
+            raise OdooError(code, f"cannot reach {self.url}: {_scrub(str(reason), self._api_key)}",
+                            "Check ODOO_URL and the network.", retryable=True) from exc
+        if status >= 400:
+            raise map_json2_error(status, data, self._api_key)
+        return data
+
+    def _call(self, model: str, method: str, args: list[Any], kwargs: dict[str, Any] | None) -> Any:
+        """One ORM call on the configured wire. Callers have already applied every allow-list."""
+        if self.protocol == "json2":
+            return self._json2(f"/json/2/{model}/{method}", json2_body(method, args, kwargs))
+        payload = [self.db, self.uid, self._api_key, model, method, args, kwargs or {}]
+        try:
+            return self._rpc("object", "execute_kw", payload)
+        except OdooError as exc:
+            if exc.code != "auth_failed":
+                raise
+            self.forget_session()  # nothing was executed: retry once with a fresh uid (expired session / key rotation)
+            payload[1] = self.uid
+            return self._rpc("object", "execute_kw", payload)
+
     # ---- session ----------------------------------------------------------------------------
 
     def version(self) -> dict[str, Any]:
         s = self._session()
         if s.version is None:
-            s.version = self._rpc("common", "version", []) or {}
+            if self.protocol == "json2":  # public web-client route, JSON-RPC envelope, no key needed
+                data = self._json2(VERSION_PATH, {"jsonrpc": "2.0", "method": "call", "params": {}, "id": 1}, auth=False)
+                s.version = (data or {}).get("result") or {} if isinstance(data, dict) else {}
+            else:
+                s.version = self._rpc("common", "version", []) or {}
         return s.version
 
     @property
     def server_major(self) -> int:
-        info = self.version().get("server_version_info") or [0]
-        try:
-            return int(info[0])
-        except (TypeError, ValueError, IndexError):
-            return 0
+        return major_version(self.version().get("server_version_info"))
 
     @property
     def uid(self) -> int:
         s = self._session()
+        if s.uid is None and self.protocol == "json2":
+            s.uid = self._json2_uid()
         if s.uid is None:
             uid = self._rpc("common", "authenticate", [self.db, self.username, self._api_key, {}])
             if not uid:
@@ -254,6 +369,18 @@ class OdooClient:
                                 "Check ODOO_DB, ODOO_USERNAME and ODOO_API_KEY (Odoo 18 keys can expire).")
             s.uid = int(uid)
         return s.uid
+
+    def _json2_uid(self) -> int:
+        """JSON-2 has no login step: the key's user comes from ``context_get`` or, failing that, the login."""
+        ctx = self.execute_kw("res.users", "context_get", []) or {}
+        if isinstance(ctx, dict) and ctx.get("uid"):
+            return int(ctx["uid"])
+        if self.username:
+            rows = self.execute_kw("res.users", "search_read", [[("login", "=", self.username)]], {"fields": ["id"], "limit": 1})
+            if rows:
+                return int(rows[0]["id"])
+        raise OdooError("unknown_user", "cannot tell which Odoo user this API key belongs to",
+                        "Set ODOO_USERNAME to the login of the key's user (needed for 'me' and the user's time zone).")
 
     def forget_session(self) -> None:
         with _sessions_lock:
@@ -263,7 +390,18 @@ class OdooClient:
         """tz / lang / company ids of the API user (cached)."""
         s = self._session()
         if s.user_context is None:
-            rows = self.read("res.users", [self.uid], ["tz", "lang", "company_id", "company_ids", "name"])
+            try:
+                uid = self.uid
+            except OdooError as exc:
+                if exc.code != "unknown_user":
+                    raise
+                uid = None
+            if uid is None:  # JSON-2 without a resolvable user: language and time zone only
+                ctx = self.execute_kw("res.users", "context_get", []) or {}
+                s.user_context = {"name": None, "tz": ctx.get("tz") or "UTC", "lang": ctx.get("lang") or "en_US",
+                                  "company_id": None, "company_ids": []}
+                return s.user_context
+            rows = self.read("res.users", [uid], ["tz", "lang", "company_id", "company_ids", "name"])
             row = rows[0] if rows else {}
             s.user_context = {
                 "name": row.get("name"),
@@ -287,21 +425,14 @@ class OdooClient:
     # ---- read-only execute_kw ----------------------------------------------------------------
 
     def execute_kw(self, model: str, method: str, args: list[Any], kwargs: dict[str, Any] | None = None) -> Any:
-        if method not in READ_METHODS:
+        if method not in READ_METHODS and (model, method) not in EXTRA_READS:
             raise ReadOnlyViolation(f"{model}.{method}")
         if model not in ALLOWED_MODELS:
             raise OdooError("model_not_allowed", f"model {model!r} is not in the allow-list",
                             "Allowed: " + ", ".join(sorted(ALLOWED_MODELS)))
         if method not in SCHEMA_METHODS:
             self.require_area(model)
-        try:
-            return self._rpc("object", "execute_kw", [self.db, self.uid, self._api_key, model, method, args, kwargs or {}])
-        except OdooError as exc:
-            if exc.code == "auth_failed":
-                self.forget_session()  # retry once with a fresh uid (expired session / key rotation)
-                return self._rpc("object", "execute_kw",
-                                 [self.db, self.uid, self._api_key, model, method, args, kwargs or {}])
-            raise
+        return self._call(model, method, args, kwargs)
 
     # ---- allow-listed writes -----------------------------------------------------------------
 
@@ -319,15 +450,7 @@ class OdooClient:
             if bad or not values:
                 raise OdooError("field_not_writable", "refused: cannot write " + (", ".join(bad) or "nothing"),
                                 "Writable: " + ", ".join(sorted(LEAD_WRITABLE_FIELDS)))
-        payload = [self.db, self.uid, self._api_key, model, method, args, kwargs or {}]
-        try:
-            return self._rpc("object", "execute_kw", payload)
-        except OdooError as exc:
-            if exc.code == "auth_failed":  # nothing was executed: safe to retry once with a fresh uid
-                self.forget_session()
-                payload[1] = self.uid
-                return self._rpc("object", "execute_kw", payload)
-            raise
+        return self._call(model, method, args, kwargs)
 
     def search_read(self, model: str, domain: list[Any], fields: list[str], *, limit: int | None = None,
                     offset: int = 0, order: str | None = None, context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -361,7 +484,8 @@ class OdooClient:
 
     def name_search(self, model: str, name: str, *, domain: list[Any] | None = None, limit: int = 10,
                     context: dict[str, Any] | None = None) -> list[tuple[int, str]]:
-        kwargs: dict[str, Any] = {"args": domain or [], "limit": limit}
+        # Odoo 18 renamed name_search's ``args`` to ``domain``.
+        kwargs: dict[str, Any] = {"domain" if self.server_major >= 18 else "args": domain or [], "limit": limit}
         if context:
             kwargs["context"] = context
         rows = self.execute_kw(model, "name_search", [name], kwargs) or []

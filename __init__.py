@@ -32,7 +32,7 @@ _TOOLS = (
      tool_check("crm", "activities", write=True)),
     ("odoo_update_lead_stage", schemas.ODOO_UPDATE_LEAD_STAGE, tools.odoo_update_lead_stage, "✍️", tool_check("crm", write=True)),
 )
-REQUIRED_ENV = ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY"]
+REQUIRED_ENV = ["ODOO_URL", "ODOO_API_KEY"]  # + ODOO_DB / ODOO_USERNAME for JSON-RPC (settings.make_client)
 
 
 def register(ctx) -> None:

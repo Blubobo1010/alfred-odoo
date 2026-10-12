@@ -30,7 +30,7 @@ def test_register_matches_manifest_without_network(fake):
     assert {t["toolset"] for t in ctx.tools.values()} == {"odoo"}
     for name, t in ctx.tools.items():
         assert t["schema"]["name"] == name
-        assert t["requires_env"] == ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY"]
+        assert t["requires_env"] == ["ODOO_URL", "ODOO_API_KEY"]
         assert callable(t["handler"]) and callable(t["check_fn"])
     assert ctx.skills["odoo-crm"].is_file()
     assert "odoo" in ctx.cli

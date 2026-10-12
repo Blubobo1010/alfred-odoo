@@ -327,7 +327,7 @@ def odoo_pipeline_summary(client: OdooClient, settings: Settings, args: dict[str
         try:
             groups = client.read_group("crm.lead", domain, sums, [groupby], context=ctx)
         except OdooError as exc:
-            if exc.code != "odoo_error":
+            if exc.code not in ("odoo_error", "model_not_installed"):  # JSON-2 on Odoo 19+: read_group gone
                 raise
             groups, _, truncated = _client_side_group(client, domain, groupby, ctx, lead_fields, None)
     currency = _currency(client, [])
@@ -772,9 +772,18 @@ def ping(client: OdooClient, settings: Settings | None = None) -> dict[str, Any]
     """Used by `hermes odoo test`: authenticate and describe what the connection can see."""
     version = client.version()
     user = client.user_context()
-    out: dict[str, Any] = {"url": client.url, "db": client.db, "odoo_version": version.get("server_version"),
-                           "user": user.get("name"), "uid": client.uid, "tz": user.get("tz"), "lang": user.get("lang"),
-                           "company_ids": user.get("company_ids")}
+    try:
+        uid: int | None = client.uid
+    except OdooError as exc:
+        if exc.code != "unknown_user":
+            raise
+        uid = None
+    out: dict[str, Any] = {"url": client.url, "api": client.protocol, "db": client.db or None,
+                           "odoo_version": version.get("server_version"), "user": user.get("name"), "uid": uid,
+                           "tz": user.get("tz"), "lang": user.get("lang"), "company_ids": user.get("company_ids")}
+    if uid is None:
+        out["user_note"] = ("The key's user could not be identified: set ODOO_USERNAME to its login so 'me' "
+                            "filters and the user's time zone work.")
     if settings is not None:
         out["write_enabled"] = settings.write_enabled
         out["write_tools"] = list(WRITE_TOOL_NAMES) if settings.write_enabled else []

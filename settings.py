@@ -7,9 +7,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .client import OdooClient, OdooError, normalize_areas
+from .client import PROTOCOLS, OdooClient, OdooError, normalize_areas
 
-REQUIRED_ENV = ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY")
+REQUIRED_ENV = ("ODOO_URL", "ODOO_API_KEY")
+JSONRPC_ENV = ("ODOO_DB", "ODOO_USERNAME")  # also required when the JSON-RPC API is used
+ALL_ENV = REQUIRED_ENV[:1] + JSONRPC_ENV + REQUIRED_ENV[1:]
 
 _ctx: Any = None  # the PluginContext handed to register(); settings are read live from it
 
@@ -54,6 +56,7 @@ class Settings:
     revenue_range: tuple[float, float] | None = None
     custom_fields: tuple[tuple[str, str], ...] = ()
     config_errors: tuple[str, ...] = ()
+    api: str = "auto"
 
 
 _LABEL = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
@@ -95,6 +98,10 @@ def load_settings() -> Settings:
     errors: list[str] = []
     revenue_range = _parsed(parse_revenue_range, setting("revenue_range", []), None, errors)
     custom_fields = _parsed(parse_custom_fields, setting("custom_fields", []), (), errors)
+    api = str(setting("api", "auto") or "auto").strip().lower()
+    if api not in ("auto", *PROTOCOLS):
+        errors.append(f"api must be auto, {' or '.join(PROTOCOLS)} (got {api!r})")
+        api = "auto"
     return Settings(
         default_limit=int(setting("default_limit", 20) or 20),
         timezone=str(setting("timezone", "") or ""),
@@ -110,7 +117,15 @@ def load_settings() -> Settings:
         revenue_range=revenue_range,
         custom_fields=custom_fields,
         config_errors=tuple(errors),
+        api=api,
     )
+
+
+def resolve_protocol(settings: Settings, env: dict[str, str]) -> str:
+    """``api: auto`` = JSON-RPC when database and login are both set (installs before 0.4.0), else JSON-2."""
+    if settings.api != "auto":
+        return settings.api
+    return "jsonrpc" if all(env.get(n) for n in JSONRPC_ENV) else "json2"
 
 
 def _parsed(parse: Any, value: Any, fallback: Any, errors: list[str]) -> Any:
@@ -125,7 +140,9 @@ def _parsed(parse: Any, value: Any, fallback: Any, errors: list[str]) -> Any:
 def is_configured() -> bool:
     """check_fn for every tool: never touches the network (tool availability is cached by Hermes)."""
     try:
-        return all(get_secret(n) for n in REQUIRED_ENV)
+        env = {n: get_secret(n) for n in ALL_ENV}
+        needed = REQUIRED_ENV + (JSONRPC_ENV if resolve_protocol(load_settings(), env) == "jsonrpc" else ())
+        return all(env[n] for n in needed)
     except Exception:  # noqa: BLE001 - UnscopedSecretError & co.: treat as not configured
         return False
 
@@ -163,13 +180,15 @@ def write_enabled() -> bool:
 
 def make_client(settings: Settings | None = None) -> OdooClient:
     settings = settings or load_settings()
-    values = {n: get_secret(n) for n in REQUIRED_ENV}
-    missing = [n for n, v in values.items() if not v]
+    values = {n: get_secret(n) for n in ALL_ENV}
+    protocol = resolve_protocol(settings, values)
+    needed = REQUIRED_ENV + (JSONRPC_ENV if protocol == "jsonrpc" else ())
+    missing = [n for n in needed if not values[n]]
     if missing:
         raise OdooError("not_configured", "Odoo credentials are missing: " + ", ".join(missing),
                         "Set them in the Hermes .env (hermes plugins install prompts for them) and restart the gateway.")
     return OdooClient(values["ODOO_URL"], values["ODOO_DB"], values["ODOO_USERNAME"], values["ODOO_API_KEY"],
-                      areas=settings.enabled_areas, timeout=settings.timeout_seconds)
+                      areas=settings.enabled_areas, timeout=settings.timeout_seconds, protocol=protocol)
 
 
 def call_context(client: OdooClient, settings: Settings, **extra: Any) -> dict[str, Any]:

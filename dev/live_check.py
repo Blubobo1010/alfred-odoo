@@ -19,9 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Data areas the check enables (default: all). LIVE_AREAS=crm,contacts checks a restricted setup.
 AREAS = os.environ.get("LIVE_AREAS", "crm,contacts,activities,chatter")
-# Optional data rules, e.g. LIVE_REVENUE_RANGE=100000,2000000 LIVE_CUSTOM_FIELDS=model=x_studio_modello_auto_1
-RULES = {k: os.environ[v] for k, v in (("revenue_range", "LIVE_REVENUE_RANGE"), ("custom_fields", "LIVE_CUSTOM_FIELDS"))
-         if os.environ.get(v)}
+# Optional settings: LIVE_API=json2|jsonrpc, data rules e.g. LIVE_REVENUE_RANGE=100000,2000000 LIVE_CUSTOM_FIELDS=model=x_studio_modello_auto_1
+RULES = {k: os.environ[v] for k, v in (("revenue_range", "LIVE_REVENUE_RANGE"), ("custom_fields", "LIVE_CUSTOM_FIELDS"),
+                                      ("api", "LIVE_API")) if os.environ.get(v)}
 
 
 class _Ctx:

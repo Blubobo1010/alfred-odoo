@@ -171,6 +171,7 @@ def test_log_note_on_odoo_16_sends_html_without_the_17_flag(configured, monkeypa
 
     fake16 = FakeOdoo(version=16)
     monkeypatch.setattr(client_mod, "default_transport", fake16)
+    monkeypatch.setattr(client_mod, "default_json2_transport", fake16.json2)
     settings_mod.bind_context(FakeCtx({"write_enabled": True, "enabled_areas": ALL_AREAS}))
     assert call(tools.odoo_log_note, lead_id=10, note="hi")["ok"]
     kwargs = fake16.writes[0][3]

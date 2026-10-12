@@ -34,7 +34,8 @@ def odoo_command(args: argparse.Namespace) -> int:
             return 0
         if command == "whoami":
             user = client.user_context()
-            print(f"{user.get('name')} (uid {client.uid}) on {client.url} / {client.db}")
+            print(f"{user.get('name')} (uid {client.uid}) on {client.url}" + (f" / {client.db}" if client.db else "")
+                  + f" via {client.protocol}")
             return 0
         if command == "fields":
             if args.model not in ALLOWED_MODELS:
